@@ -1,6 +1,6 @@
 """Drift measurement (resumable, per task).
 
-    03_measure.py [--only SLUG ...] [--device cuda] [--combine]
+    03_measure.py [--only SLUG ...] [--device cuda] [--no-ownalpha] [--combine]
 
 Per task writes results/drift/<slug>/{drift_long,families,eta2,posctrl}.parquet then
 done.json (last). PubChem rand anchor + correlation clusters live in results/drift/_global/.
@@ -21,7 +21,7 @@ from drift import config
 from drift.config import BENCHMARKS, DATA, RESULTS, RUNS, SEEDS, slug
 from drift.descriptors import descriptor_modules, prepare_targets
 from drift.encoders import embed, load_mp, random_mp
-from drift.measure import (clean_rows, compare_to_pre, family_labels, family_outputs, long_rows,
+from drift.measure import (alpha_rows, clean_rows, compare_to_pre, family_labels, measure_own_alpha, family_outputs, long_rows,
                            measure_probe_set, posctrl_rows, predict_probe, weight_change)
 from drift.probe import choose_alpha, make_folds
 from drift.stats import correlation_clusters, positive_control
@@ -111,6 +111,54 @@ def ensure_global(pub: Pubchem, mods: pd.Series):
     r2 = res["r2_pre"]
     log(f"global done: pre PubChem R2 median={np.nanmedian(r2):.3f} "
         f"rand median={np.nanmedian(np.concatenate([v for v in res['r2'].values()])):.3f} alpha={pub.alpha}")
+
+
+def _cached_alphas(path):
+    return json.loads(path.read_text()) if path.exists() else {}
+
+
+def ensure_global_ownalpha(pub: Pubchem):
+    """rand0..2 with per-encoder alpha on PubChem (probe_set pubchem_ownalpha)."""
+    if (GLOBAL / "ownalpha_done.json").exists():
+        return
+    log("global: own-alpha rand anchor")
+    Zr = {f"rand{i}": pub.embed_enc(f"rand{i}", lambda i=i: random_mp(i)) for i in range(3)}
+    res = measure_own_alpha(pub.Z_pre, Zr, pub.targets, EVAL, FIT, pub.alpha, pub.Yhat_pre)
+    base = dict(task="", regime="", ckpt="", probe_set="pubchem_ownalpha")
+    df = pd.concat([long_rows(res, pub.targets.names, base, "rand"), alpha_rows(base, res["alphas"], pub.alpha)],
+                   ignore_index=True)
+    df.to_parquet(GLOBAL / "drift_long_ownalpha.parquet")
+    (GLOBAL / "ownalpha_done.json").write_text(json.dumps(res["alphas"]))
+
+
+def ownalpha_task(name, pub: Pubchem):
+    """Secondary: es-checkpoint ft encoders (both regimes) on PubChem with per-encoder alpha."""
+    d = OUT / slug(name)
+    if (d / "ownalpha_done.json").exists():
+        return
+    runs = expected_runs(name)
+    if runs is None:
+        return
+    t0 = time.time()
+    s = slug(name)
+    cache_p = d / "ownalpha_alphas.json"
+    cache = _cached_alphas(cache_p)
+    out = []
+    for regime in config.REGIMES:
+        Zq = {}
+        for seed in SEEDS:
+            dd = runs[(regime, seed)]["dir"]
+            Zq[f"seed{seed}"] = pub.embed_enc(f"{s}__{regime}__s{seed}__es",
+                                              lambda dd=dd: load_mp(dd / "es_mp.pt"))
+        res = measure_own_alpha(pub.Z_pre, Zq, pub.targets, EVAL, FIT, pub.alpha, pub.Yhat_pre,
+                                alphas=cache.get(regime))
+        cache[regime] = res["alphas"]
+        cache_p.write_text(json.dumps(cache))
+        base = dict(task=name, regime=regime, ckpt="es", probe_set="pubchem_ownalpha")
+        out += [long_rows(res, pub.targets.names, base, "ft"), alpha_rows(base, res["alphas"], pub.alpha)]
+    pd.concat(out, ignore_index=True).to_parquet(d / "drift_long_ownalpha.parquet")
+    (d / "ownalpha_done.json").write_text(json.dumps(cache))
+    log(f"{name}: own-alpha done in {time.time() - t0:.0f}s {cache}")
 
 
 def expected_runs(name):
@@ -221,6 +269,8 @@ def combine():
     for f in ("drift_long", "families", "eta2", "posctrl"):
         parts = sorted(OUT.glob(f"*/{f}.parquet"))
         parts = [p for p in parts if p.parent.name == "_global" or (p.parent / "done.json").exists()]
+        if f == "drift_long":
+            parts += sorted(OUT.glob("*/drift_long_ownalpha.parquet"))
         df = pd.concat([pd.read_parquet(p) for p in parts], ignore_index=True)
         df.to_parquet(RESULTS / f"{f}.parquet")
         log(f"combined {f}: {len(df)} rows from {len(parts)} parts")
@@ -231,6 +281,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--only", nargs="*", default=None, help="task slugs")
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    ap.add_argument("--ownalpha", action=argparse.BooleanOptionalAction, default=True,
+                    help="secondary per-encoder-alpha PubChem measurement (--no-ownalpha to skip)")
     ap.add_argument("--combine", action="store_true")
     a = ap.parse_args()
     if a.combine:
@@ -238,6 +290,8 @@ def main():
     mods = descriptor_modules()
     pub = Pubchem(a.device)
     ensure_global(pub, mods)
+    if a.ownalpha:
+        ensure_global_ownalpha(pub)
     cl = pd.read_parquet(GLOBAL / "corr_clusters.parquet")
     cluster_map = dict(zip(cl["descriptor"], cl["cluster"]))
     for name in BENCHMARKS:
@@ -245,8 +299,10 @@ def main():
             continue
         if (OUT / slug(name) / "done.json").exists():
             log(f"{name}: already done")
-            continue
-        measure_task(name, pub, mods, cluster_map, a.device)
+        else:
+            measure_task(name, pub, mods, cluster_map, a.device)
+        if a.ownalpha:
+            ownalpha_task(name, pub)
 
 
 if __name__ == "__main__":

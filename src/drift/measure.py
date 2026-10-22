@@ -198,3 +198,26 @@ def posctrl_rows(res: dict, names, top_names, base: dict) -> pd.DataFrame:
                          "descriptor": top, "delta_mean": res["delta_mean"][ii],
                          "se": res["se"][ii], "eligible": res["eligible"][ii],
                          "dropped": np.where(res["eligible"][ii], res["dropped"][ii].astype(float), np.nan)})
+
+
+def measure_own_alpha(Z_pre, Z_by_encoder: dict, targets, eval_rows, fit_rows, alpha_pre, Yhat_pre,
+                      alphas: dict | None = None, n_boot: int = config.N_BOOT) -> dict:
+    """PubChem 'split' comparison where every encoder uses alpha chosen on its OWN fit
+    embeddings (pre keeps alpha_pre, i.e. its own). `alphas` may hold cached values
+    {enc: alpha}. Returns compare_to_pre result plus alphas {enc: alpha}."""
+    Y = np.asarray(targets.Y, dtype=np.float64)
+    alphas = dict(alphas or {})
+    preds = {}
+    for e, Z in Z_by_encoder.items():
+        if e not in alphas:
+            alphas[e] = choose_alpha(Z[fit_rows], Y[fit_rows])
+        preds[e] = predict_probe(Z, Y, "split", alpha=alphas[e], fit_rows=fit_rows)
+    rows = {e: np.asarray(eval_rows) for e in Z_by_encoder}
+    out = compare_to_pre(Y, Yhat_pre, preds, Z_pre, Z_by_encoder, rows, n_boot=n_boot)
+    out["alphas"] = alphas
+    return out
+
+
+def alpha_rows(base: dict, alphas: dict, alpha_pre: float) -> pd.DataFrame:
+    return pd.concat([_block(base, e, "alpha", "", a) for e, a in {"pre": alpha_pre, **alphas}.items()],
+                     ignore_index=True)[LONG_COLS]

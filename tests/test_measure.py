@@ -165,3 +165,18 @@ def test_pre_r2_per_seed_stored_for_clean_rows(synth):
     df = long_rows(out, T.names, base, "ft")
     r2 = df[df.measure == "r2"]
     assert {"pre@seed42", "pre@seed117", "pre@seed709"} <= set(r2.encoder)
+
+
+def test_own_alpha_matches_fixed_alpha_when_alpha_agrees(synth):
+    from drift.measure import alpha_rows, measure_own_alpha
+    Z, lost, T, n = synth
+    fit = np.arange(300)
+    ev = np.arange(300, 400)
+    ref = measure_probe_set(Z, {s: lost for s in SEEDS}, T, ev, mode="split", fit_rows=fit, alpha=10.0, n_boot=20)
+    own = measure_own_alpha(Z, {s: lost for s in SEEDS}, T, ev, fit, 10.0, ref["Yhat_pre"],
+                            alphas={s: 10.0 for s in SEEDS}, n_boot=20)
+    np.testing.assert_allclose(own["delta_mean"], ref["delta_mean"])
+    own2 = measure_own_alpha(Z, {s: lost for s in SEEDS}, T, ev, fit, 10.0, ref["Yhat_pre"], n_boot=20)
+    assert set(own2["alphas"]) == set(SEEDS) and own2["dropped"][0]
+    df = alpha_rows(dict(task="t", regime="full", ckpt="es", probe_set="pubchem_ownalpha"), own2["alphas"], 10.0)
+    assert set(df.encoder) == {"pre", *SEEDS} and set(df.measure) == {"alpha"}
