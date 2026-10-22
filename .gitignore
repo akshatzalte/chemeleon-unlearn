@@ -1,0 +1,8 @@
+data/
+runs/
+results/
+external/
+lightning_logs/
+__pycache__/
+*.egg-info/
+.superpowers/
