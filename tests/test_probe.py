@@ -161,3 +161,28 @@ def test_choose_alpha_without_nan_free_columns():
     assert choose_alpha(Z, Y, grid) <= 10
     Yn = r.normal(size=(200, 3)); Yn[r.random(200) < 0.1, :] = np.nan
     assert choose_alpha(Z, Yn, grid) >= 1e3
+
+
+def test_near_constant_column_spike_is_bounded():
+    r = np.random.default_rng(5)
+    Z = r.normal(size=(300, 12))
+    Z[:, 0] = 0.0
+    Z[:3, 0] = 1e-4                                 # near-constant fit column, tiny SD
+    Y = Z[:, 1:4] @ r.normal(size=(3, 2)) + 0.1 * r.normal(size=(300, 2))
+    Ze = r.normal(size=(20, 12))
+    Ze[5, 0] = 1e3                                  # one eval row spikes on that column
+    Zf = Z.copy()
+    P = ridge_fit_predict(Zf, Y, Ze, alpha=10.0)
+    Ze0 = Ze.copy(); Ze0[5, 0] = 0.0
+    P0 = ridge_fit_predict(Zf, Y, Ze0, alpha=10.0)
+    assert np.abs(P[5] - P0[5]).max() < 5 * np.abs(Y).max()
+    assert np.isfinite(P).all()
+
+
+def test_floor_and_clip_are_noops_on_well_scaled_data():
+    from drift.probe import _scale, _standardize
+    r = np.random.default_rng(1)
+    Z = r.normal(size=(120, 15)) * r.uniform(0.5, 5, 15)
+    mu, sd = _standardize(Z)
+    np.testing.assert_allclose(sd, Z.std(0))
+    np.testing.assert_allclose(_scale(Z, mu, sd), (Z - mu) / Z.std(0))

@@ -93,7 +93,7 @@ def test_long_format_schema(synth):
     assert list(df.columns) == LONG_COLS
     assert df["value"].dtype == np.float64
     ms = set(df["measure"])
-    assert ms == {"r2", "delta_r2", "cka", "delta_r2_mean", "se", "dropped", "cka_seedpair"}
+    assert ms == {"r2", "delta_r2", "cka", "delta_r2_mean", "se", "dropped", "cka_seedpair", "n_eligible"}
     assert set(df[df.measure == "dropped"]["encoder"]) == {"ft"}
     assert set(df[df.measure == "delta_r2"]["encoder"]) == set(SEEDS)
     assert "pre" in set(df[df.measure == "r2"]["encoder"])
@@ -133,3 +133,35 @@ def test_family_and_posctrl_outputs(synth):
     assert list(eta.columns) == ["task", "regime", "ckpt", "probe_set", "family_def", "eta2", "null_q95", "p"]
     pc = posctrl_rows(out, T.names, ["d0", "d3", "nope"], base)
     assert list(pc["descriptor"]) == ["d0", "d3"] and pc["dropped"].tolist() == [True, False]
+
+
+def test_ineligible_descriptor_cannot_be_dropped_and_is_excluded(synth):
+    Z, lost, T, n = synth
+    Y = T.Y.copy()
+    Y[:, 0] = np.random.default_rng(3).normal(size=n)      # pre R2 ~ 0 for d0 -> ineligible
+    T2 = Targets(Y, T.names, [])
+    out = measure_probe_set(Z, {s: lost for s in SEEDS}, T2, np.arange(n), mode="crossfit",
+                            folds=make_folds(n), alpha=1.0, n_boot=20)
+    assert not out["eligible"][0] and out["eligible"][1:].all()
+    assert not out["dropped"][0]
+    base = dict(task="t", regime="full", ckpt="es", probe_set="task_all")
+    df = long_rows(out, T2.names, base, "ft")
+    d = df[df.measure == "dropped"].set_index("descriptor")["value"]
+    assert np.isnan(d["d0"]) and d["d1"] == 0.0
+    assert df[df.measure == "n_eligible"]["value"].iloc[0] == 5
+    import pandas as pd
+    from drift.measure import family_labels, family_outputs
+    mods = pd.Series(["A"] * 6, index=T2.names)
+    fam, _ = family_outputs(out, T2.names, family_labels(T2.names, mods, {}), base, n_perm=20)
+    assert fam[fam.family_def == "module"]["n"].iloc[0] == 5
+
+
+def test_pre_r2_per_seed_stored_for_clean_rows(synth):
+    Z, lost, T, n = synth
+    rows = {"seed42": np.arange(0, 100), "seed117": np.arange(100, 200), "seed709": np.arange(200, 300)}
+    out = measure_probe_set(Z, {s: lost for s in SEEDS}, T, rows, mode="crossfit",
+                            folds=make_folds(n), alpha=1.0, n_boot=20)
+    base = dict(task="t", regime="full", ckpt="es", probe_set="task_clean")
+    df = long_rows(out, T.names, base, "ft")
+    r2 = df[df.measure == "r2"]
+    assert {"pre@seed42", "pre@seed117", "pre@seed709"} <= set(r2.encoder)

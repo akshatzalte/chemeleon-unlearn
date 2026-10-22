@@ -3,7 +3,10 @@
 Ridge semantics everywhere: exact ridge with an UNPENALIZED intercept, penalty
 ``alpha`` on the sum-of-squares scale (identical to
 ``sklearn.linear_model.Ridge(alpha=alpha, fit_intercept=True)``), on Z columns
-standardized with mean/SD over the fit rows (SD == 0 -> 1).
+standardized with mean/SD over the fit rows. Each column's SD is floored at SD_FLOOR_FRAC (1%)
+of the median SD over columns with SD > 0 (all-constant Z: SD = 1), and standardized values
+(fit AND eval rows) are clipped to +-Z_CLIP, so near-constant/sparse embedding columns cannot
+produce exploding held-out predictions. Applied identically to every encoder and caller.
 """
 from __future__ import annotations
 
@@ -32,11 +35,21 @@ def make_folds(n: int, k: int = 5, seed: int = 0) -> np.ndarray:
     return folds
 
 
+SD_FLOOR_FRAC = 0.01
+Z_CLIP = 6.0
+
+
 def _standardize(Z_fit: np.ndarray):
     mu = Z_fit.mean(0)
     sd = Z_fit.std(0)
-    sd = np.where(sd == 0, 1.0, sd)
-    return mu, sd
+    pos = sd[sd > 0]
+    floor = SD_FLOOR_FRAC * np.median(pos) if len(pos) else 1.0
+    return mu, np.maximum(sd, floor)
+
+
+def _scale(Z, mu, sd):
+    """Standardize with fit stats and clip to +-Z_CLIP."""
+    return np.clip((Z - mu) / sd, -Z_CLIP, Z_CLIP)
 
 
 # ------------------------------------------------------------------------- ridge
@@ -57,8 +70,8 @@ def ridge_fit_predict(Z_fit, Y_fit, Z_eval, alpha: float) -> np.ndarray:
     n, d = Z_fit.shape
     k = Y_fit.shape[1]
     mu, sd = _standardize(Z_fit)
-    Zs = (Z_fit - mu) / sd
-    Ze = (Z_eval - mu) / sd
+    Zs = _scale(Z_fit, mu, sd)
+    Ze = _scale(Z_eval, mu, sd)
     nan = np.isnan(Y_fit)
     Y0 = np.where(nan, 0.0, Y_fit)
     G_all = Zs.T @ Zs                      # (d,d)
@@ -143,8 +156,8 @@ def choose_alpha(Z: np.ndarray, Y: np.ndarray, alphas=np.logspace(-2, 5, 15)) ->
     for f in range(5):
         te = folds == f
         mu, sd = _standardize(Z[~te])
-        Xtr = (Z[~te] - mu) / sd
-        Xte = (Z[te] - mu) / sd
+        Xtr = _scale(Z[~te], mu, sd)
+        Xte = _scale(Z[te], mu, sd)
         xm = Xtr.mean(0)
         Xtr = Xtr - xm
         Xte = Xte - xm

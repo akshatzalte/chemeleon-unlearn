@@ -52,7 +52,10 @@ def compare_to_pre(Y, Yhat_pre, Yhat_by_enc: dict, Z_pre, Z_by_enc: dict, rows_b
     Returns dict: r2 {enc: (k,)} (on its rows), delta_per_seed (S,k) in Z_by_enc order,
     delta_mean (k,), se (k,), dropped (k,) bool, cka {enc: float} (pre vs enc on its rows),
     cka_seedpair (mean pairwise CKA among encoders, only when all share the same rows,
-    else NaN), r2_pre (k,) (only when rows are shared, else None).
+    else NaN), r2_pre_by_enc {enc: (k,)} (pre's R2 on that encoder's rows), r2_pre (k,)
+    (only when rows are shared, else None).
+    eligible (k,) bool: pre's R2 > 0 on the rows of every encoder (NaN -> not eligible);
+    only eligible descriptors can be called dropped (dropped is False elsewhere).
     """
     encs = list(Z_by_enc)
     rows = [np.asarray(rows_by_enc[e]) for e in encs]
@@ -63,14 +66,19 @@ def compare_to_pre(Y, Yhat_pre, Yhat_by_enc: dict, Z_pre, Z_by_enc: dict, rows_b
         vals = [linear_cka(Z_by_enc[a][rows[0]], Z_by_enc[b][rows[0]])
                 for i, a in enumerate(encs) for b in encs[i + 1:]]
         cka_pair = float(np.mean(vals))
+    r2_pre_by_enc = {e: r2_cols(Y, Yhat_pre, r) for e, r in zip(encs, rows)}
+    with np.errstate(invalid="ignore"):
+        eligible = np.all([v > 0 for v in r2_pre_by_enc.values()], axis=0)
     return {
         "encoders": encs,
+        "r2_pre_by_enc": r2_pre_by_enc,
+        "eligible": eligible,
         "r2": {e: r2_cols(Y, Yhat_by_enc[e], r) for e, r in zip(encs, rows)},
         "r2_pre": r2_cols(Y, Yhat_pre, rows[0]) if shared else None,
         "delta_per_seed": dps,
         "delta_mean": dm,
         "se": se,
-        "dropped": drop_calls(dps, dm, se),
+        "dropped": drop_calls(dps, dm, se) & eligible,
         "cka": {e: linear_cka(Z_pre[r], Z_by_enc[e][r]) for e, r in zip(encs, rows)},
         "cka_seedpair": cka_pair,
     }
@@ -119,15 +127,21 @@ def long_rows(res: dict, names, base: dict, agg: str, include_pre_r2: bool = Tru
     """Flatten a compare_to_pre result. base = dict(task, regime, ckpt, probe_set).
     agg = encoder label for the seed aggregate ('ft' or 'rand')."""
     blocks = []
-    if include_pre_r2 and res["r2_pre"] is not None:
-        blocks.append(_block(base, "pre", "r2", names, res["r2_pre"]))
+    if include_pre_r2:
+        if res["r2_pre"] is not None:
+            blocks.append(_block(base, "pre", "r2", names, res["r2_pre"]))
+        else:
+            for e, v in res["r2_pre_by_enc"].items():
+                blocks.append(_block(base, f"pre@{e}", "r2", names, v))
     for i, e in enumerate(res["encoders"]):
         blocks.append(_block(base, e, "r2", names, res["r2"][e]))
         blocks.append(_block(base, e, "delta_r2", names, res["delta_per_seed"][i]))
         blocks.append(_block(base, e, "cka", "", res["cka"][e]))
     blocks.append(_block(base, agg, "delta_r2_mean", names, res["delta_mean"]))
     blocks.append(_block(base, agg, "se", names, res["se"]))
-    blocks.append(_block(base, agg, "dropped", names, res["dropped"].astype(float)))
+    dropped = np.where(res["eligible"], res["dropped"].astype(float), np.nan)
+    blocks.append(_block(base, agg, "dropped", names, dropped))
+    blocks.append(_block(base, agg, "n_eligible", "", float(res["eligible"].sum())))
     if not np.isnan(res["cka_seedpair"]):
         blocks.append(_block(base, agg, "cka_seedpair", "", res["cka_seedpair"]))
     df = pd.concat(blocks, ignore_index=True)
@@ -158,9 +172,12 @@ def family_outputs(res: dict, names, labels: dict, base: dict, n_perm: int = con
     from drift.stats import eta2_perm_test, family_delta
 
     fam_rows, eta_rows = [], []
-    dm = res["delta_mean"]
+    el = res["eligible"]
+    dm = res["delta_mean"][el]
+    dropped = res["dropped"][el]
     for fdef, lab in labels.items():
-        fd = family_delta(dm, res["dropped"], lab).reset_index().rename(columns={"index": "family"})
+        lab = np.asarray(lab)[el]
+        fd = family_delta(dm, dropped, lab).reset_index().rename(columns={"index": "family"})
         fd.insert(0, "family_def", fdef)
         for k, v in reversed(list(base.items())):
             fd.insert(0, k, v)
@@ -179,4 +196,5 @@ def posctrl_rows(res: dict, names, top_names, base: dict) -> pd.DataFrame:
     ii = [idx[n] for n in top]
     return pd.DataFrame({**{k: [v] * len(top) for k, v in base.items()},
                          "descriptor": top, "delta_mean": res["delta_mean"][ii],
-                         "se": res["se"][ii], "dropped": res["dropped"][ii]})
+                         "se": res["se"][ii], "eligible": res["eligible"][ii],
+                         "dropped": np.where(res["eligible"][ii], res["dropped"][ii].astype(float), np.nan)})
