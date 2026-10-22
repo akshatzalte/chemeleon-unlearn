@@ -124,14 +124,19 @@ def choose_alpha(Z: np.ndarray, Y: np.ndarray, alphas=np.logspace(-2, 5, 15)) ->
 
     Score = mean over target columns of out-of-fold R^2 (pooled over folds, SST around
     the overall mean). For speed ONLY target columns with no NaN on the given rows are
-    used (raises ValueError if there are none). One eigendecomposition per fold serves
-    every alpha. Ties resolve to the smaller alpha.
+    used. If no column is NaN-free, the columns with the fewest NaNs are used instead:
+    their NaNs are mean-imputed (fit-fold mean) for fitting, and scoring ignores NaN
+    entries (selection only; never used for final predictions). ValueError if no column
+    has data or all are constant. One eigendecomposition per fold serves every alpha.
+    Ties resolve to the smaller alpha.
     """
     Z = np.asarray(Z, dtype=np.float64)
     Y = np.asarray(Y, dtype=np.float64)
-    Y = Y[:, ~np.isnan(Y).any(0)]
-    if Y.shape[1] == 0:
-        raise ValueError("choose_alpha needs at least one target column without NaN")
+    nnan = np.isnan(Y).sum(0)
+    Y = Y[:, nnan == nnan.min()]
+    if Y.shape[1] == 0 or nnan.min() >= len(Y):
+        raise ValueError("choose_alpha needs at least one target column with data")
+    M = ~np.isnan(Y)                       # all True in the normal (NaN-free) case
     alphas = np.asarray(alphas, dtype=np.float64)
     folds = make_folds(len(Z), 5, 0)
     sse = np.zeros((len(alphas), Y.shape[1]))
@@ -144,15 +149,20 @@ def choose_alpha(Z: np.ndarray, Y: np.ndarray, alphas=np.logspace(-2, 5, 15)) ->
         Xtr = Xtr - xm
         Xte = Xte - xm
         ytr, yte = Y[~te], Y[te]
-        ym = ytr.mean(0)
+        ym = np.nanmean(ytr, axis=0)
+        ym = np.where(np.isnan(ym), 0.0, ym)
+        ytr = np.where(np.isnan(ytr), ym, ytr)   # fit-fold mean imputation (selection only)
         V, lam = _eig_basis(Xtr)
         T = V.T @ (Xtr.T @ (ytr - ym))     # (r,k)
         Pte = Xte @ V                      # (n_te,r)
+        mte = M[te]
         for i, a in enumerate(alphas):
             pred = Pte @ (T / (lam + a)[:, None]) + ym
-            sse[i] += ((yte - pred) ** 2).sum(0)
-    sst = ((Y - Y.mean(0)) ** 2).sum(0)
-    ok = sst > 0
+            sse[i] += (np.where(mte, yte - pred, 0.0) ** 2).sum(0)
+    n = M.sum(0)
+    y0 = np.where(M, Y, 0.0)
+    sst = ((np.where(M, Y - y0.sum(0) / n, 0.0)) ** 2).sum(0)
+    ok = sst > 1e-12 * (y0 ** 2).sum(0)
     if not ok.any():
         raise ValueError("all target columns are constant")
     score = (1.0 - sse[:, ok] / sst[ok]).mean(1)
@@ -174,9 +184,14 @@ def r2_cols(Y, Yhat, rows=None) -> np.ndarray:
     y = np.where(m, Y, 0.0)
     sse = (np.where(m, Y - Yhat, 0.0) ** 2).sum(0)
     with np.errstate(divide="ignore", invalid="ignore"):
-        sst = (y ** 2).sum(0) - y.sum(0) ** 2 / n
+        sst = (np.where(m, Y - y.sum(0) / n, 0.0) ** 2).sum(0)
         r2 = 1.0 - sse / sst
-    return np.where((n < 2) | (sst <= 0), np.nan, r2)
+    return np.where(_degenerate(n, sst, (y ** 2).sum(0)), np.nan, r2)
+
+
+def _degenerate(n, sst, sumsq):
+    """Shared rule: R^2 undefined with <2 rows or (numerically) zero variance."""
+    return (n < 2) | ~(sst > 1e-12 * sumsq)
 
 
 class _Moments:
@@ -199,7 +214,7 @@ class _Moments:
         with np.errstate(divide="ignore", invalid="ignore"):
             sst = w @ self.y2 - sy ** 2 / n
             r2 = 1.0 - (w @ self.e2[which]) / sst
-        return np.where((n < 2) | (sst <= 1e-12 * np.maximum(w @ self.y2, 1e-300)), np.nan, r2)
+        return np.where(_degenerate(n, sst, w @ self.y2), np.nan, r2)
 
 
 def _boot_weights(rng, m, n_boot):

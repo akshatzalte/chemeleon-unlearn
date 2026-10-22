@@ -129,3 +129,35 @@ def test_make_folds_balanced_deterministic():
     f = make_folds(103, 5)
     assert np.array_equal(f, make_folds(103, 5)) and set(f) == set(range(5))
     c = np.bincount(f); assert c.max() - c.min() <= 1
+
+
+def test_r2_constant_nonzero_column_is_nan():
+    r = np.random.default_rng(7)
+    for c in (0.1, -0.0731, 1e3):
+        Y = np.column_stack([np.full(2000, c), r.normal(size=2000)])
+        Yh = Y + r.normal(size=Y.shape)
+        assert np.isnan(r2_cols(Y, Yh)[0]) and np.isfinite(r2_cols(Y, Yh)[1])
+        d, dm, se = paired_bootstrap_delta(Y, Yh, [Yh + 0.1], [np.arange(2000)], n_boot=20)
+        assert np.isnan(d[0, 0]) and np.isnan(se[0]) and np.isfinite(d[0, 1])
+
+
+def test_crossfit_detects_leakage_and_matches_per_fold_fit():
+    r = np.random.default_rng(8)
+    Z = r.normal(size=(60, 100)); Y = r.normal(size=(60, 2)); f = make_folds(60)
+    P = crossfit_predict(Z, Y, f, alpha=1e-3)
+    assert r2_cols(Y, P).max() < 0.2
+    assert r2_cols(Y, ridge_fit_predict(Z, Y, Z, 1e-3)).min() > 0.9   # in-sample would leak
+    for k in range(5):
+        te = f == k
+        np.testing.assert_allclose(P[te], ridge_fit_predict(Z[~te], Y[~te], Z[te], 1e-3))
+
+
+def test_choose_alpha_without_nan_free_columns():
+    r = np.random.default_rng(9)
+    Z = r.normal(size=(200, 30))
+    Y = Z[:, :3] @ r.normal(size=(3, 3)) + 0.01 * r.normal(size=(200, 3))
+    Y[r.random(200) < 0.1, 0] = np.nan; Y[r.random(200) < 0.2, 1] = np.nan; Y[r.random(200) < 0.2, 2] = np.nan
+    grid = np.logspace(-2, 5, 15)
+    assert choose_alpha(Z, Y, grid) <= 10
+    Yn = r.normal(size=(200, 3)); Yn[r.random(200) < 0.1, :] = np.nan
+    assert choose_alpha(Z, Yn, grid) >= 1e3
