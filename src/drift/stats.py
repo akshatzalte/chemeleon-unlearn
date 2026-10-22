@@ -22,10 +22,27 @@ def drop_calls(delta_per_seed, delta_mean, se_mean, abs_thr=DROP_ABS, se_mult=DR
     return valid & hit
 
 
+def _spearman_pairwise(Y):
+    """Spearman matrix: rank each column over its non-NaN rows, then Pearson over
+    pairwise-complete rows (computed with masked matrix products). NaN if undefined."""
+    ranks = pd.DataFrame(Y).rank(axis=0, method="average").to_numpy()
+    M = (~np.isnan(ranks)).astype(float)
+    X = np.nan_to_num(ranks, nan=0.0)
+    n = M.T @ M
+    sx = X.T @ M          # sx[i, j] = sum of x_i over rows where i and j are both valid
+    sxy = X.T @ X
+    sxx = (X ** 2).T @ M
+    with np.errstate(invalid="ignore", divide="ignore"):
+        cov = sxy - sx * sx.T / n
+        var = sxx - sx ** 2 / n
+        C = cov / np.sqrt(var * var.T)
+    C[n < 2] = np.nan
+    return np.clip(C, -1.0, 1.0)
+
+
 def correlation_clusters(Y_fit, names, rho=CLUSTER_RHO):
     """Average-linkage clusters on 1-|Spearman| (pairwise-complete; NaN corr -> 0)."""
-    C = pd.DataFrame(np.asarray(Y_fit, dtype=float)).corr(method="spearman").to_numpy()
-    C = np.nan_to_num(C, nan=0.0)
+    C = np.nan_to_num(_spearman_pairwise(np.asarray(Y_fit, dtype=float)), nan=0.0)
     D = np.clip(1.0 - np.abs(C), 0.0, 1.0)
     D = (D + D.T) / 2
     np.fill_diagonal(D, 0.0)
