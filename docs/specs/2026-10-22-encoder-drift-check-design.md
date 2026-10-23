@@ -312,6 +312,13 @@ The cross-task "dropped in k of 28 tasks" table and the heatmap are built from b
 primary views side by side, with the others as secondary panels. Tasks flagged as
 lower-confidence (section 6.3) are shown but marked.
 
+**Pretraining overlap (added 2026-10-22).** 35% of task molecules (up to ~79% for some TDC
+sets) are in CheMeleon's pretraining train split. User's decision: the primary task view
+is NOT restricted to novel molecules — `pre` and fine-tuned encoders are compared on
+identical molecules, which keeps the comparison paired and fair. `_novel` views (molecules
+outside the pretraining train/val splits) are reported as secondary evidence, and
+overlap per task is reported alongside.
+
 
 Each branch is read together with the `ft` vs `frozen` test-score gap per task. Drift
 only counts as evidence for the hypothesis in tasks where full fine-tuning beats the frozen
