@@ -316,6 +316,14 @@ def test_tailored_contrasts_and_arm_colors():
     assert sum(len(r) for r in A.CONTRAST_ROWS) == len(A.CONTRASTS)
 
 
+def test_full_pool_contrasts_and_arm_colors():
+    for c in (("T100_full", "B_full"), ("B_full", "B"), ("T100_full", "T100"), ("B_full", "chemeleon")):
+        assert c in A.CONTRASTS and A.CONTRAST_COLOR[c]
+    assert len({A.CONTRAST_COLOR[c] for c in A.CONTRAST_ROWS[-1]}) == len(A.CONTRAST_ROWS[-1])
+    assert A.ARM_ORDER[-2:] == ("B_full", "T100_full") and A.ARM_COLOR["B_full"] and A.ARM_COLOR["T100_full"]
+    assert A.PRIMARY == ("T100", "B")
+
+
 def _with_tailored(t):
     ames = t[t.arm == "B"].assign(arm="T100_ames", score=lambda d: d.score + 0.01 * np.where(d.task == AMES, 1, -1))
     return pd.concat([t, ames])

@@ -256,9 +256,9 @@ def test_run_item_protocol_routing(ladder_env, monkeypatch):
 
 def test_worklist_and_pending_skip_arms_without_encoder(ladder_env, caplog):
     wl = L.worklist()
-    assert len(L.ARMS) == 13 and L.ARMS[:8] == ("B", "T25", "T100", "R25a", "R25b", "R100", "D535", "chemeleon")
-    assert L.ARMS[8:] == ("rand", "B_s1", "T100_s1", "T100_ames", "T100_ld50")
-    assert len(wl) == 2 * 13 * (3 * 10 + 2 * 5 + 3 * 3) and len({*wl}) == len(wl)
+    assert len(L.ARMS) == 15 and L.ARMS[:8] == ("B", "T25", "T100", "R25a", "R25b", "R100", "D535", "chemeleon")
+    assert L.ARMS[8:] == ("rand", "B_s1", "T100_s1", "T100_ames", "T100_ld50", "B_full", "T100_full")
+    assert len(wl) == 2 * 15 * (3 * 10 + 2 * 5 + 3 * 3) and len({*wl}) == len(wl)
     assert {a for _, a, _, _ in wl} == set(L.ARMS) and wl[0][2] == "full"
     assert {n for _, _, n, s in wl if s >= 3} >= {16, 128}
     _make_arm("B")
@@ -341,6 +341,55 @@ def test_arm_ready_rejects_pool_build_mismatch(ladder_env, caplog):
     shutil.rmtree(L.pretrain_dir("T25"))
     _make_arm("T25")
     assert L.arm_ready("B") and L.arm_ready("T25")
+
+
+FULL_BUILD = {"n_train": 847000, "n_val": 94000, "seed": 0, "wall_s": 120.0}
+
+
+def test_full_pool_arms_ready_within_their_own_group(ladder_env, caplog):
+    _make_arm("B")  # 180k arm on POOL_BUILD
+    _make_arm("B_full", n_train=847000, pool_build=FULL_BUILD)
+    _make_arm("T100_full", n_train=847000, pool_build=FULL_BUILD)
+    with caplog.at_level(logging.WARNING):
+        # n_train 847000 / a different pool_build than the 180k arms is fine for the _full pair
+        assert L.arm_ready("B_full") and L.arm_ready("T100_full") and L.arm_ready("B")
+    assert not caplog.text
+    # the _full arms must not poison (or be compared with) the 180k arms' consistency check
+    _make_arm("T25")
+    assert L.arm_ready("T25") and L.arm_ready("B")
+
+
+def test_full_pool_arms_reject_mismatch_between_them(ladder_env, caplog):
+    _make_arm("B_full", n_train=847000, pool_build=FULL_BUILD)
+    _make_arm("T100_full", n_train=847000, pool_build={**FULL_BUILD, "seed": 1})
+    with caplog.at_level(logging.WARNING):
+        assert not L.arm_ready("B_full") and not L.arm_ready("T100_full")
+    assert "pool_build" in caplog.text and "T100_full" in caplog.text
+    # differing n_train alone is also an inconsistency
+    shutil.rmtree(L.pretrain_dir("T100_full"))
+    _make_arm("T100_full", n_train=846000, pool_build=FULL_BUILD)
+    assert not L.arm_ready("B_full") and not L.arm_ready("T100_full")
+    shutil.rmtree(L.pretrain_dir("T100_full"))
+    _make_arm("T100_full", n_train=847000, pool_build=FULL_BUILD)
+    assert L.arm_ready("B_full") and L.arm_ready("T100_full")
+
+
+def test_full_pool_arms_still_need_patience_15_and_pool_build(ladder_env, caplog):
+    _make_arm("B_full", patience=5, n_train=847000, pool_build=FULL_BUILD)
+    with caplog.at_level(logging.WARNING):
+        assert not L.arm_ready("B_full")
+    assert "patience" in caplog.text
+    shutil.rmtree(L.pretrain_dir("B_full"))
+    _make_arm("B_full", n_train=847000)
+    (L.pretrain_dir("B_full") / "config.json").write_text(json.dumps(dict(arm="B_full", patience=15, n_train=847000)))
+    caplog.clear()
+    with caplog.at_level(logging.WARNING):
+        assert not L.arm_ready("B_full")
+    assert "pool_build" in caplog.text
+    # 180k arms keep the n_train rule even when a _full arm exists
+    _make_arm("T100_full", n_train=847000, pool_build=FULL_BUILD)
+    _make_arm("B", n_train=847000)
+    assert not L.arm_ready("B")
 
 
 def test_ft_seed_mapping():

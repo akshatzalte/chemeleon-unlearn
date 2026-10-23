@@ -28,9 +28,11 @@ MIN_POINTS = 2  # of the 3 small-N points, per task
 # (arm_a, arm_b) contrasts shown as gap panels; a - b > 0 means a is better.
 CONTRASTS = (("T100", "B"), ("T25", "B"), ("T100", "R100"), ("T25", "R25a"), ("T25", "R25b"), ("B", "chemeleon"),
              ("B", "rand"),  # own gap panel (row 4): pretraining vs a random-init encoder
-             ("T100_ames", "B"), ("T100_ld50", "B"), ("T100_ames", "T100"), ("T100_ld50", "T100"))  # row 5: per-task sets
-CONTRAST_ROWS = (CONTRASTS[:3], CONTRASTS[3:6], CONTRASTS[6:7], CONTRASTS[7:])  # gap panels in curves(), rows 2-5
-ARM_ORDER = ("B", "T25", "T100", "R25a", "R25b", "R100", "chemeleon", "D535", "rand", "T100_ames", "T100_ld50")
+             ("T100_ames", "B"), ("T100_ld50", "B"), ("T100_ames", "T100"), ("T100_ld50", "T100"),  # row 5: per-task sets
+             ("T100_full", "B_full"), ("B_full", "B"), ("T100_full", "T100"), ("B_full", "chemeleon"))  # row 6: full-pool arms
+CONTRAST_ROWS = (CONTRASTS[:3], CONTRASTS[3:6], CONTRASTS[6:7], CONTRASTS[7:11], CONTRASTS[11:])  # gap panels, rows 2-6
+ARM_ORDER = ("B", "T25", "T100", "R25a", "R25b", "R100", "chemeleon", "D535", "rand", "T100_ames", "T100_ld50",
+             "B_full", "T100_full")
 METRIC_LABEL = {"tdcommons/ames": "Ames ROC-AUC (higher better)", "tdcommons/ld50-zhu": "LD50 MAE (lower better)"}
 
 
@@ -154,7 +156,7 @@ def endpoint(scores: pd.DataFrame) -> dict:
 # --------------------------------------------------------------------------------------------- plotting
 # Reference categorical palette (dataviz skill, light mode), assigned in fixed entity order.
 _CAT = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300", "#6250d6", "#e34948"]
-_CAT_EXTRA = ["#0a9396", "#9b2fae"]  # the per-task arms T100_ames, T100_ld50
+_CAT_EXTRA = ["#0a9396", "#9b2fae", "#7a5c00", "#4a4a9a"]  # T100_ames, T100_ld50, B_full, T100_full
 ARM_COLOR = {a: _CAT[i] for i, a in enumerate(ARM_ORDER[:8])}
 ARM_COLOR.update(zip(ARM_ORDER[8:], ["#6b6a66", *_CAT_EXTRA]))  # rand = neutral grey: the no-pretraining baseline
 CONTRAST_COLOR = {c: _CAT[i % len(_CAT)] for i, c in enumerate(CONTRASTS)}  # distinct within each panel row

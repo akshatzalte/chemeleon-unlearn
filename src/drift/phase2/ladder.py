@@ -30,9 +30,10 @@ log = logging.getLogger(__name__)
 TASKS = ("tdcommons/ames", "tdcommons/ld50-zhu")
 # The first 8 arms keep their order (shard keys depend on it); later arms are appended: `rand` = never-pretrained
 # encoder (scripts/p2_06_make_rand.py), `B_s1` / `T100_s1` = second pretraining seed of B / T100,
-# `T100_ames` / `T100_ld50` = per-task tailored top-100 sets (drift.phase2.sets).
+# `T100_ames` / `T100_ld50` = per-task tailored top-100 sets (drift.phase2.sets), `B_full` / `T100_full` = B / T100
+# target sets pretrained on the FULL pool (data/phase2/pool_full, ~941k molecules; arm names ending `_full`).
 ARMS = ("B", "T25", "T100", "R25a", "R25b", "R100", "D535", "chemeleon", "rand", "B_s1", "T100_s1",
-        "T100_ames", "T100_ld50")
+        "T100_ames", "T100_ld50", "B_full", "T100_full")
 NO_PRETRAIN_CHECKS = ("chemeleon", "rand")  # ready as soon as the encoder file exists (no patience/pool checks)
 SIZES = (16, 32, 64, 128, 256, 512, 1024, "full")
 FIXED_STEPS = 16
@@ -136,14 +137,20 @@ def _pool_id(cfg: dict) -> str:
     return hashlib.sha1(json.dumps(cfg.get("pool_build"), sort_keys=True).encode()).hexdigest()[:12]
 
 
+def _is_full(arm: str) -> bool:
+    """Arms pretrained on the full pool: judged against each other, not against the 180k-row arms."""
+    return arm.endswith("_full")
+
+
 def _config_problem(arm: str) -> str | None:
-    """Why this arm's pretraining config.json is not the final protocol (None = fine)."""
+    """Why this arm's pretraining config.json is not the final protocol (None = fine). `_full` arms are not held to
+    the 180000-row n_train (their mutual consistency is checked in arm_ready)."""
     cfg = _pretrain_config(arm)
     if cfg is None:
         return f"no config.json in {pretrain_dir(arm)}"
     if cfg.get("patience") != REQUIRED_PATIENCE:
         return f"config.json patience={cfg.get('patience')} (need {REQUIRED_PATIENCE})"
-    if cfg.get("n_train") != REQUIRED_N_TRAIN:
+    if not _is_full(arm) and cfg.get("n_train") != REQUIRED_N_TRAIN:
         return f"config.json n_train={cfg.get('n_train')} (need {REQUIRED_N_TRAIN})"
     if cfg.get("pool_build") is None:
         return "config.json has no pool_build"
@@ -153,7 +160,9 @@ def _config_problem(arm: str) -> str | None:
 def arm_ready(arm: str) -> bool:
     """CheMeleon always; `rand` as soon as its mp.pt exists. A pretrained arm is ready once it wrote done.json and mp.pt AND its config.json shows the
     final protocol (patience 15, the full 180000-row train pool) on the same pool_build as every other arm that
-    passes those checks (a mismatch rejects all of the disagreeing arms). A rejected arm is logged with the reason."""
+    passes those checks (a mismatch rejects all of the disagreeing arms). `_full` arms (full ~941k pool) need patience
+    15 and a pool_build but not n_train == 180000; their n_train / pool_build must match each other only, and are never
+    compared with the 180k arms. A rejected arm is logged with the reason."""
     if arm == "chemeleon":
         return True
     if arm == "rand":
@@ -162,13 +171,16 @@ def arm_ready(arm: str) -> bool:
         return False
     problem = _config_problem(arm)
     if problem is None:
-        mine = _pool_id(_pretrain_config(arm))
-        others = {a: _pool_id(c) for a in ARMS if a != arm and a not in NO_PRETRAIN_CHECKS
+        cfg = _pretrain_config(arm)
+        mine = (_pool_id(cfg), cfg.get("n_train"))
+        # consistency only within the arm's own group: `_full` arms among themselves, all others among themselves
+        others = {a: (_pool_id(c), c.get("n_train")) for a in ARMS
+                  if a != arm and a not in NO_PRETRAIN_CHECKS and _is_full(a) == _is_full(arm)
                   if (pretrain_dir(a) / "done.json").exists() and _config_problem(a) is None
                   and (c := _pretrain_config(a)) is not None}
-        differing = sorted(a for a, pid in others.items() if pid != mine)
+        differing = sorted(a for a, key in others.items() if key != mine)
         if differing:
-            problem = f"pool_build {mine} differs from that of arm(s) {', '.join(differing)}"
+            problem = (f"pool_build {mine[0]} / n_train {mine[1]} differs from that of arm(s) {', '.join(differing)}")
     if problem:
         log.warning("arm %s: finished but NOT ready: %s", arm, problem)
     return problem is None
