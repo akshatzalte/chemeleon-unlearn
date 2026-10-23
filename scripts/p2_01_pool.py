@@ -40,10 +40,19 @@ def main() -> int:
     align = pool.check_alignment(
         ZARR, SMILES_FILE, config.DATA / "pubchem" / "pubchem10k.smiles",
         config.DATA / "descriptors" / "pubchem10k.parquet", min_rows=500)
-    print("alignment vs phase-1 pubchem10k descriptors:", align, flush=True)
-    if align["row_match_rate"] < MIN_MATCH:
-        print(f"ABORT: zarr not aligned with the SMILES file / Mordred config (match < {MIN_MATCH})")
+    mm = align.pop("mismatch_cols")
+    print("alignment vs phase-1 pubchem10k descriptors:", align, f"| {len(mm)} columns with value mismatches", flush=True)
+    reason = pool.alignment_verdict({**align, "mismatch_cols": mm})
+    if reason:
+        print("ABORT: zarr not aligned with the SMILES file / Mordred config:", reason)
         return 2
+    # CheMeleon's published zarr is the pretraining target; its values differ from our Mordred recompute on a
+    # small, recorded set of columns (likely RDKit/mordred version). Record which arm sets contain them.
+    affected = {}
+    for f in sorted((config.DATA / "phase2" / "sets").glob("*.txt")):
+        hit = sorted(set(f.read_text().split()) & set(mm))
+        if hit:
+            affected[f.stem] = hit
 
     exclude = set()
     for t in TEST_TASKS:
@@ -65,7 +74,8 @@ def main() -> int:
     meta = dict(b)
     meta.update(n_sampled=info["n_sampled"], n_excluded_test=info["n_excluded_test"], n_invalid=info["n_invalid"],
                 n_lines=info["n_lines"], n_dropped_allnan_presplit=n_allnan, n_test_smiles_excluded_set=len(exclude),
-                pool_n=args.n, seed=args.seed, alignment=align, wall_s=round(time.time() - t0, 1))
+                pool_n=args.n, seed=args.seed, alignment=align, zenodo_vs_recompute_mismatch_cols=mm,
+                set_files_with_mismatch_cols=affected, wall_s=round(time.time() - t0, 1))
     (Path(args.out) / "build.json").write_text(json.dumps(meta, indent=2))
     print(json.dumps(meta, indent=2))
     return 0

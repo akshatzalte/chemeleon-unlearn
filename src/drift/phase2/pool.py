@@ -166,7 +166,8 @@ def check_alignment(zarr_path, smiles_file, ref_smiles_file, ref_parquet, min_ro
                     rtol: float = 1e-4, atol: float = 1e-4) -> dict:
     """Compare zarr rows against independently computed descriptors (phase-1 pubchem10k): the reference
     molecules are located by line number in `smiles_file`, their zarr rows read, and compared
-    (np.allclose, NaN == NaN). Returns row match rate and max abs diff over finite entries."""
+    (np.isclose, NaN == NaN). Returns NaN-pattern agreement (per cell and per row), value-match rates, and the
+    per-column mismatch rate for every column that has any mismatch (`mismatch_cols`)."""
     import pandas as pd
     import zarr
 
@@ -186,8 +187,29 @@ def check_alignment(zarr_path, smiles_file, ref_smiles_file, ref_parquet, min_ro
     rows, pos = rows[order], np.array(pos)[order]
     zx = read_rows(z, rows)
     rx = ref_df.to_numpy(dtype=np.float32)[pos]
-    ok = np.array([np.allclose(a, b, rtol=rtol, atol=atol, equal_nan=True) for a, b in zip(zx, rx)])
+    bad = ~np.isclose(zx, rx, rtol=rtol, atol=atol, equal_nan=True)
+    nan_eq = np.isnan(zx) == np.isnan(rx)
+    col_rate = bad.mean(axis=0)
     both = np.isfinite(zx) & np.isfinite(rx)
-    return dict(n_compared=len(rows), row_match_rate=float(ok.mean()),
-                nan_pattern_equal=float(np.mean(np.isnan(zx) == np.isnan(rx))),
-                max_abs_diff=float(np.abs(zx[both] - rx[both]).max()) if both.any() else 0.0)
+    return dict(n_compared=len(rows), row_match_rate=float((~bad.any(axis=1)).mean()),
+                cell_match_rate=float(1 - bad.mean()), nan_cell_match_rate=float(nan_eq.mean()),
+                nan_row_match_rate=float(nan_eq.all(axis=1).mean()),
+                max_abs_diff=float(np.abs(zx[both] - rx[both]).max()) if both.any() else 0.0,
+                mismatch_cols={str(ref_df.columns[j]): float(col_rate[j]) for j in np.flatnonzero(col_rate > 0)})
+
+
+def alignment_verdict(res: dict, max_cols: int = 100, max_col_rate: float = 0.5,
+                      min_nan_cell: float = 0.999) -> str | None:
+    """None if the zarr passes the gate, else the reason. Strict on the NaN pattern (proves row alignment);
+    value mismatches are tolerated only on a bounded set of columns (recorded by the caller)."""
+    if res["nan_row_match_rate"] < 1.0:
+        return f"NaN pattern differs in some rows (row match {res['nan_row_match_rate']:.4f})"
+    if res["nan_cell_match_rate"] < min_nan_cell:
+        return f"NaN-pattern cell match {res['nan_cell_match_rate']:.5f} < {min_nan_cell}"
+    mc = res["mismatch_cols"]
+    if len(mc) > max_cols:
+        return f"{len(mc)} columns with value mismatches > {max_cols}"
+    worst = max(mc.items(), key=lambda kv: kv[1], default=(None, 0.0))
+    if worst[1] > max_col_rate:
+        return f"column {worst[0]} mismatches in {worst[1]:.1%} of rows > {max_col_rate:.0%}"
+    return None

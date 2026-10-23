@@ -123,5 +123,19 @@ def test_check_alignment_detects_mismatch(tmp_path):
     pd.DataFrame(x[pick]).to_parquet(pq)
     res = pool.check_alignment(zp, sf, rf, pq)
     assert res["n_compared"] == 520 and res["row_match_rate"] == 1.0 and res["max_abs_diff"] == 0.0
+    assert res["mismatch_cols"] == {} and res["nan_row_match_rate"] == 1.0
+    assert pool.alignment_verdict(res) is None
+    # a few columns with value mismatches (NaN pattern intact) are reported and tolerated
+    y = x[pick].copy()
+    y[:100, 7] += 1.0
+    y[:, 9] += 1.0
+    pd.DataFrame(y, columns=[f"c{j}" for j in range(1613)]).to_parquet(pq)
+    res = pool.check_alignment(zp, sf, rf, pq)
+    assert set(res["mismatch_cols"]) == {"c7", "c9"} and res["mismatch_cols"]["c9"] == 1.0
+    assert res["nan_row_match_rate"] == 1.0
+    assert "c9" in pool.alignment_verdict(res)  # c9 mismatches in 100% of rows > 50%
+    assert pool.alignment_verdict({**res, "mismatch_cols": {"c7": 0.2}}) is None
+    assert pool.alignment_verdict({**res, "mismatch_cols": {f"c{j}": 0.01 for j in range(101)}}) is not None
     pd.DataFrame(x[np.roll(pick, 1)]).to_parquet(pq)  # shifted rows -> not aligned
-    assert pool.check_alignment(zp, sf, rf, pq)["row_match_rate"] < 0.05
+    res = pool.check_alignment(zp, sf, rf, pq)
+    assert res["row_match_rate"] < 0.05 and pool.alignment_verdict(res) is not None
