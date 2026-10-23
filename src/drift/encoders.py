@@ -39,15 +39,17 @@ def random_mp(seed: int) -> BondMessagePassing:
     return _make_mp(hparams)
 
 
-def build_mpnn(mp: BondMessagePassing, task_type: str, scaler=None) -> MPNN:
-    """MPNN with MeanAggregation and a fresh FFN head (chemprop defaults otherwise)."""
+def build_mpnn(mp: BondMessagePassing, task_type: str, scaler=None, mpnn_kwargs: dict | None = None) -> MPNN:
+    """MPNN with MeanAggregation and a fresh FFN head (chemprop defaults otherwise).
+
+    `mpnn_kwargs` is passed to the `MPNN` constructor (e.g. `warmup_epochs`, `max_lr`)."""
     kw = dict(input_dim=mp.output_dim, hidden_dim=FFN_HIDDEN)
     if task_type == "regression":
         transform = UnscaleTransform.from_standard_scaler(scaler) if scaler is not None else None
         ffn = RegressionFFN(output_transform=transform, **kw)
     else:
         ffn = BinaryClassificationFFN(**kw)
-    return MPNN(message_passing=mp, agg=MeanAggregation(), predictor=ffn)
+    return MPNN(message_passing=mp, agg=MeanAggregation(), predictor=ffn, **(mpnn_kwargs or {}))
 
 
 def embed(mp: BondMessagePassing, smiles: list[str], batch_size: int = 256, device: str = "cuda") -> np.ndarray:
