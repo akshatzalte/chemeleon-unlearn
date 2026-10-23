@@ -13,6 +13,26 @@ as all 1613; a 200k-molecule, one-GPU, one-hour run matches the public 1M-molecu
 The "task-tailored descriptor targets" idea is closed; the positive by-product is a very cheap
 pretraining recipe and the finding that the pretraining *target set* is not a lever.
 
+### Results at a glance
+
+| question | answer | evidence |
+|---|---|---|
+| Does fine-tuning unlearn what pretraining taught? | Partly: ~16% of pretraining-added descriptor information becomes unrecoverable at full data, ~8% at 128 molecules | phase 1, 28 tasks × 3 seeds, exact ridge probe |
+| Is what is unlearned task-specific? | Mostly not: 80% of the forgetting pattern is shared across tasks; nothing becomes *more* recoverable | cross-task Spearman 0.81; positive control fails everywhere |
+| Does pretraining on task-tailored targets help low-data fine-tuning? | No detectable effect at any N; 25 tailored targets are slightly *worse* than 25 random ones on Ames | phase 2, pre-registered endpoint 0/3 points, both tasks |
+| Does the target set matter at all? | Not detectably: 25 random real descriptors ≈ 100 tailored ≈ 1613 ≈ public CheMeleon | eight arms within ~0.03 at every N |
+| Does pretraining matter at all? | Yes, from N ≈ 32 upward (+0.07 AUC / +0.05 MAE vs a never-pretrained encoder) | `rand` arm |
+| Can CheMeleon be re-pretrained cheaply? | Yes: 200k molecules, one RTX 4090, ~1 hour, matches the public 1M model downstream | B vs chemeleon ≈ 0 |
+
+### If you have ten minutes
+
+1. Read §1 (the hypothesis) and the two premises.
+2. Look at the phase-1 heatmap in §2: the structure is in the *columns* (descriptor
+   families), not the *rows* (tasks) — every task forgets the same things.
+3. Look at the phase-2 ladder figure in §3: eight pretrained encoders, one bundle of curves.
+4. Read "Why the feature-level selector did not transfer" in §3.
+5. §4 for what we keep and where this points.
+
 ---
 
 ## 1. The hypothesis
@@ -89,7 +109,18 @@ Polaris 28 tasks ──► fine-tune CheMeleon ──► 324 encoders ──► 
   autocorrelations).
 - The descriptors fine-tuning generically *preserves* are the least task-relevant ones.
 
+![Task × descriptor-family drift](docs/results/summary/heatmap_pubchem.png)
+
+*Mean ΔR² per Mordred module after full-data fine-tuning (red = forgotten), one row per task.
+The pattern is a property of the descriptor families, not of the task: topological indices and
+ring counts erode everywhere; simple counts barely move. Tasks differ in **how much** they
+drift (LD50, Ames, lipophilicity most), not in **what** they drop.*
+
 ![PC spectrum](docs/results/summary/pc_spectrum.png)
+
+*Loss by principal component of the descriptor space: the high-variance directions (size,
+composition) are nearly intact; the fine detail in the tail is where fine-tuning spends its
+budget — and it does so far less with 128 molecules.*
 
 Read for the hypothesis: fine-tuning erodes pretraining detail, generically; at 128
 molecules it barely moves the encoder. That was a warning sign for "tailoring", but not a
@@ -136,6 +167,10 @@ by more than the paired SD at ≥ 2 of 3 points in both tasks with the gap shrin
 ### Results
 
 ![Ladder curves](docs/results/phase2/curves.png)
+
+*Top: test score vs fine-tuning set size for every arm (mean ± SE over paired subsamples).
+Below: paired gaps for the contrasts that matter, with the zero line. A real tailoring
+effect would show as T100 − B above zero and shrinking with N; it does neither.*
 
 | task | T100 − B at N=16/32/64 (gap > SD?) | Spearman(gap, N) | verdict |
 |---|---|---|---|
@@ -189,7 +224,52 @@ methodologies"; their positive signals were *relevant molecules* (a 40k analog s
 
 ---
 
-## 5. Repository map
+## 5. Questions colleagues have asked
+
+**"Random descriptors? You mean random numbers?"** No. R25/R100 are real Mordred descriptors
+chosen at random from the 535 cluster representatives — real chemistry, just not chosen for the
+task. The never-pretrained encoder is a separate arm (`rand`), and it *is* worse.
+
+**"Isn't the FFN sanity check already the answer?"** It showed the tailored descriptors carry
+the task's information *as input features*. Phase 2 shows that is not the same as being a
+better *pretraining target*: any handful of real descriptors already forces the encoder to
+learn the same general chemistry.
+
+**"How do you know the ladder could detect anything?"** The never-pretrained arm is clearly
+worse from N ≈ 32 (+0.07 AUC at N = 64–128); pretraining-seed replicates differ by ≤ 0.015; and
+the paired design puts every arm on the identical molecules at every (N, seed). Effects below
+~0.02 are not excluded — that is the detectable size with 10 seeds.
+
+**"Why only two tasks in phase 2?"** Pretraining is the expensive step. Ames and LD50 were the
+phase-1 pair with the most similar task-specific drift *and* only 22% shared molecules, so a
+shared "tox-tailored" set was the fairest test. OpenADMET's independent 15-target sweep covers
+the breadth.
+
+**"Why 16 optimizer steps at N ≤ 64?"** The paper protocol early-stops on a validation split,
+which at N = 16 would be three molecules. Sixteen steps with batch min(N, 16) is roughly where
+phase-1's best 128-molecule checkpoints sat; it is the same for every arm.
+
+**"What about the 58 descriptors that differ between the Zenodo targets and our recompute?"**
+RDKit/mordred version drift in the original run (worst: nHBAcc). We pretrain on the published
+values — they are CheMeleon's actual targets — and record the affected columns.
+
+### Compute and timeline
+
+Phase 1: 324 fine-tunes (~10 GPU-h) + probing (~3 h on CPU/GPU). Phase 2: 12 pretraining runs
+(~11 GPU-h), 1078 ladder fine-tunes (~3 GPU-h), Mordred descriptors reused from Zenodo. All on
+two RTX 4090s over two days; every stage is resumable and scripted.
+
+### Decision log
+
+Every judgment call made while building — probe regularization, what counts as "dropped",
+patience 5 → 15 after a training-length confound, the pretraining-overlap decision, the
+Zenodo-vs-recompute mismatch, and the controls added after review — is recorded with its
+rationale and its cost-if-wrong in the build ledgers:
+`docs/results/2026-10-22-phase1-build-ledger.md`, `docs/results/2026-10-23-phase2-build-ledger.md`.
+
+---
+
+## 6. Repository map
 
 ```
 docs/specs/      design documents (phase 1, phase 2) — the authority each plan argues from
