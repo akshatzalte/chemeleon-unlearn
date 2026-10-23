@@ -198,13 +198,15 @@ def test_run_item_protocol_routing(ladder_env, monkeypatch):
 
 def test_worklist_and_pending_skip_arms_without_encoder(ladder_env, caplog):
     wl = L.worklist()
-    assert len(wl) == 2 * 8 * (3 * 10 + 2 * 5 + 3 * 3) and len({*wl}) == len(wl)
+    assert len(L.ARMS) == 11 and L.ARMS[:8] == ("B", "T25", "T100", "R25a", "R25b", "R100", "D535", "chemeleon")
+    assert L.ARMS[8:] == ("rand", "B_s1", "T100_s1")
+    assert len(wl) == 2 * 11 * (3 * 10 + 2 * 5 + 3 * 3) and len({*wl}) == len(wl)
     assert {a for _, a, _, _ in wl} == set(L.ARMS) and wl[0][2] == "full"
     assert {n for _, _, n, s in wl if s >= 3} >= {16, 128}
     _make_arm("B")
     with caplog.at_level(logging.WARNING):
         todo = L.pending(wl)
-    assert {a for _, a, _, _ in todo} == {"B", "chemeleon"}
+    assert {a for _, a, _, _ in todo} == {"B", "chemeleon"}  # rand has no mp.pt yet
     assert "arm T100: no finished encoder" in caplog.text
     done = todo[0]
     L.run_dir(*done).mkdir(parents=True)
@@ -240,6 +242,36 @@ def test_arm_ready_requires_patience_15_full_pool_and_consistent_pool(ladder_env
     assert "R25b" in caplog.text and "config.json" in caplog.text
 
 
+def test_rand_arm_ready_bypasses_pretraining_checks(ladder_env, caplog):
+    assert not L.arm_ready("rand")  # nothing on disk
+    d = L.pretrain_dir("rand")
+    d.mkdir(parents=True)
+    shutil.copy(config.CHEMELEON_MP, d / "mp.pt")  # only the encoder: no done.json / config.json / n_train / pool_build
+    with caplog.at_level(logging.WARNING):
+        assert L.arm_ready("rand")
+    assert "rand" not in caplog.text and L.arm_mp_path("rand") == d / "mp.pt"
+    # a rand config with patience null / no pool_build must not poison the pool_build consistency check of real arms
+    (d / "done.json").write_text("{}")
+    (d / "config.json").write_text(json.dumps(dict(arm="rand", patience=None, note="random init, no pretraining")))
+    _make_arm("B")
+    _make_arm("B_s1")
+    assert L.arm_ready("rand") and L.arm_ready("B") and L.arm_ready("B_s1")
+    todo = L.pending(L.worklist())
+    assert {a for _, a, _, _ in todo} == {"rand", "B", "B_s1", "chemeleon"}
+    only = [it for it in L.shard_items(L.worklist(), 0, 3) if it[1] in {"rand", "B_s1", "T100_s1"}]
+    assert {a for _, a, _, _ in L.pending(only)} == {"rand", "B_s1"}  # T100_s1 not finished yet
+    done = next(it for it in only if it[1] == "rand")
+    L.run_dir(*done).mkdir(parents=True)
+    (L.run_dir(*done) / "done.json").write_text("{}")
+    assert done not in L.pending(only)
+
+
+def test_second_seed_arms_need_final_protocol(ladder_env):
+    _make_arm("B_s1", patience=5)
+    _make_arm("T100_s1")
+    assert not L.arm_ready("B_s1") and L.arm_ready("T100_s1")
+
+
 def test_arm_ready_rejects_pool_build_mismatch(ladder_env, caplog):
     _make_arm("B")
     _make_arm("T25", pool_build={**POOL_BUILD, "seed": 1})  # built from a different pool
@@ -271,7 +303,7 @@ def test_shards_partition_worklist_and_mix_arms(n):
     assert max(map(len, parts)) - min(map(len, parts)) <= len(wl) // n * 0.05 + 1  # balanced
 
 
-@pytest.mark.parametrize("n, J", [(1, 2), (2, 3), (3, 2), (2, 4), (4, 2), (1, 8), (3, 3)])
+@pytest.mark.parametrize("n, J", [(1, 2), (1, 3), (2, 3), (3, 2), (2, 4), (4, 2), (1, 8), (3, 3), (1, 6)])
 def test_subsharding_children_partition_parent(n, J):
     """--jobs-per-gpu J: shard i/n -> children (i + n*j)/(n*J); they partition the parent and each child mixes arms."""
     wl = L.worklist()
@@ -282,6 +314,13 @@ def test_subsharding_children_partition_parent(n, J):
         assert len(flat) == len(parent) and set(flat) == set(parent)
         for k in kids:
             assert {a for _, a, _, _ in k} == set(L.ARMS)
+
+
+def test_first_eight_arms_keep_worklist_order():
+    """New arms are appended: within each (task, N, seed) block the first 8 arms keep their relative order."""
+    wl = L.worklist()
+    assert [a for _, a, _, _ in wl[:len(L.ARMS)]] == list(L.ARMS)
+    assert L.worklist(arms=L.ARMS[:8])[:8] == wl[:8]
 
 
 def test_shard_key_does_not_pin_arms_for_6_shards():

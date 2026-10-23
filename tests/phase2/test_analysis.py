@@ -154,6 +154,25 @@ def test_curves_writes_png(tmp_path):
     assert out.stat().st_size > 5000
 
 
+def test_curves_with_rand_arm_and_pair_check_ignores_extra_arms(tmp_path):
+    t = _table(DECREASING)
+    rand = t[t.arm == "B"].assign(arm="rand", score=lambda d: d.score - 0.05 * np.where(d.task == AMES, 1, -1))
+    s1 = t[t.arm == "B"].assign(arm="B_s1")  # second-seed arms share the subsample (same sha1)
+    full = pd.concat([t, rand, s1])
+    out = tmp_path / "curves_rand.png"
+    A.curves(full, out)
+    assert out.stat().st_size > 5000
+    assert ("B", "rand") in A.CONTRASTS and A.ARM_COLOR["rand"] and A.CONTRAST_COLOR[("B", "rand")]
+    g = A.gaps(full, "B", "rand")
+    assert len(g) and (g.gap > 0).all()  # pretrained B beats the (worse) random arm in higher-is-better units
+    chk, ok = A.check_endpoint_pairs(full)
+    assert ok and list(chk.filter(like="n_").columns) == ["n_T100", "n_B"]
+    # a rand row on a different subsample is caught by the sha1 consistency check
+    bad = pd.concat([t, rand.assign(subsample_sha1=lambda d: np.where(d.index == d.index[0], "x", d.subsample_sha1))])
+    assert not A.check_endpoint_pairs(bad)[1]
+    assert A.endpoint(full)["success"] == A.endpoint(t)["success"]
+
+
 def _load_script(name):
     import importlib.util
 

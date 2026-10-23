@@ -28,7 +28,10 @@ from drift.tasks import TaskData, load_task
 log = logging.getLogger(__name__)
 
 TASKS = ("tdcommons/ames", "tdcommons/ld50-zhu")
-ARMS = ("B", "T25", "T100", "R25a", "R25b", "R100", "D535", "chemeleon")
+# The first 8 arms keep their order (shard keys depend on it); later arms are appended: `rand` = never-pretrained
+# encoder (scripts/p2_06_make_rand.py), `B_s1` / `T100_s1` = second pretraining seed of B / T100.
+ARMS = ("B", "T25", "T100", "R25a", "R25b", "R100", "D535", "chemeleon", "rand", "B_s1", "T100_s1")
+NO_PRETRAIN_CHECKS = ("chemeleon", "rand")  # ready as soon as the encoder file exists (no patience/pool checks)
 SIZES = (16, 32, 64, 128, 256, 512, 1024, "full")
 FIXED_STEPS = 16
 MAX_FIXED_BATCH = 16
@@ -137,17 +140,19 @@ def _config_problem(arm: str) -> str | None:
 
 
 def arm_ready(arm: str) -> bool:
-    """CheMeleon always. A pretrained arm is ready once it wrote done.json and mp.pt AND its config.json shows the
+    """CheMeleon always; `rand` as soon as its mp.pt exists. A pretrained arm is ready once it wrote done.json and mp.pt AND its config.json shows the
     final protocol (patience 15, the full 180000-row train pool) on the same pool_build as every other arm that
     passes those checks (a mismatch rejects all of the disagreeing arms). A rejected arm is logged with the reason."""
     if arm == "chemeleon":
         return True
+    if arm == "rand":
+        return arm_mp_path(arm).exists()
     if not ((pretrain_dir(arm) / "done.json").exists() and arm_mp_path(arm).exists()):
         return False
     problem = _config_problem(arm)
     if problem is None:
         mine = _pool_id(_pretrain_config(arm))
-        others = {a: _pool_id(c) for a in ARMS if a not in (arm, "chemeleon")
+        others = {a: _pool_id(c) for a in ARMS if a != arm and a not in NO_PRETRAIN_CHECKS
                   if (pretrain_dir(a) / "done.json").exists() and _config_problem(a) is None
                   and (c := _pretrain_config(a)) is not None}
         differing = sorted(a for a, pid in others.items() if pid != mine)
