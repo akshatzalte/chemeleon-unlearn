@@ -198,6 +198,12 @@ discards needed information.
 - Ames information is diffuse: at k=100 random matches tailored in the FFN check. The
   tailoring hypothesis is expected to show mainly on LD50 and on Ames only at k=25.
 - Shallow-FFN scores are CV on the train split, not Polaris test scores.
+- The relevance selector was computed on our recomputed Mordred values (phase 1); pretraining
+  targets come from CheMeleon's published zarr. The two agree on 99.95% of cells with
+  identical NaN patterns, but 58 descriptors differ on a minority of rows (RDKit/mordred
+  version drift in the authors' run; worst: nHBAcc, +1–5 on ~15% of molecules). Affected
+  set members: T25 — MIC3; T100 — 6 of 100 incl. nHBAcc; R25a — nHBAcc; R25b — IC4; R100 —
+  3. Too small to change cluster ranks; recorded in `data/phase2/pool/build.json`.
 
 ## 10. Left to the builder
 
