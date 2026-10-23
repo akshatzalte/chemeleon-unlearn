@@ -1,0 +1,125 @@
+{
+  "settings": {
+    "n_train": 180000,
+    "n_val": 20000,
+    "batch_size": 512,
+    "precision": "fp32",
+    "num_workers": 4,
+    "epochs_timed": 2,
+    "note": "s_per_epoch = epoch 2 (train + val), after warm-up epoch; B on GPU 0 and T25 on GPU 1 run concurrently; GPU 1 is shared with another user and ~18% slower"
+  },
+  "gate": {
+    "B": {
+      "s_per_epoch": 54.46,
+      "epoch_seconds": [
+        54.52,
+        54.46
+      ],
+      "gpu_max_allocated_mb": 6686,
+      "gpu_max_reserved_mb": 15680,
+      "val_loss_epoch2": 0.2626
+    },
+    "T25": {
+      "s_per_epoch": 63.36,
+      "epoch_seconds": [
+        63.58,
+        63.36
+      ],
+      "gpu_max_allocated_mb": 6634,
+      "gpu_max_reserved_mb": 15460,
+      "val_loss_epoch2": 0.117
+    }
+  },
+  "diag_20k_rows_s_per_epoch": {
+    "B_gpu0": 5.33,
+    "B_gpu1": 6.4,
+    "T25_gpu0": 5.21,
+    "T25_gpu1": 6.14
+  },
+  "extrapolation_gpu_hours": {
+    "B_alone_100ep": {
+      "gpu0_rate": 1.51,
+      "gpu1_rate": 1.76
+    },
+    "B_alone_30ep": {
+      "gpu0_rate": 0.45,
+      "gpu1_rate": 0.53
+    },
+    "6_arms_100ep": {
+      "gpu0_rate": 9.08,
+      "gpu1_rate": 10.56
+    },
+    "6_arms_30ep": {
+      "gpu0_rate": 2.72,
+      "gpu1_rate": 3.17
+    },
+    "7_arms_incl_D535_100ep": {
+      "gpu0_rate": 10.59,
+      "gpu1_rate": 12.32
+    },
+    "7_arms_incl_D535_30ep": {
+      "gpu0_rate": 3.18,
+      "gpu1_rate": 3.7
+    },
+    "note": "per-epoch cost is independent of k (B at 1613 targets == T25 at 25 targets on the same GPU); wall-clock with 2 GPUs is about half"
+  },
+  "b_alone_over_24_gpu_h": false,
+  "smoke_2000rows_2epochs": {
+    "B": {
+      "k": 1613,
+      "val_loss": [
+        1.2932,
+        1.123
+      ],
+      "wall_s": 5.1
+    },
+    "T25": {
+      "k": 25,
+      "val_loss": [
+        1.5502,
+        1.1515
+      ],
+      "wall_s": 5.3
+    },
+    "T100": {
+      "k": 100,
+      "val_loss": [
+        1.5923,
+        1.2664
+      ],
+      "wall_s": 4.5
+    },
+    "R25a": {
+      "k": 25,
+      "val_loss": [
+        1.13,
+        1.1069
+      ],
+      "wall_s": 5.1
+    },
+    "R25b": {
+      "k": 25,
+      "val_loss": [
+        1.1914,
+        1.1304
+      ],
+      "wall_s": 4.4
+    },
+    "R100": {
+      "k": 100,
+      "val_loss": [
+        1.1458,
+        1.0211
+      ],
+      "wall_s": 4.6
+    },
+    "D535": {
+      "k": 535,
+      "val_loss": [
+        1.2489,
+        1.1349
+      ],
+      "wall_s": 4.7
+    }
+  }
+}
