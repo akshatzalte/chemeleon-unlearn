@@ -92,13 +92,30 @@ with paired subsamples.
 
 ## Critique experiments (mechanism-level checks)
 
-*Pending — appended when scored:* random-initialized encoder arm (is pretraining detectable
-at each N at all?); second pretraining seeds for B and T100 (pretraining-seed variance on the
-primary contrast); frozen-encoder ladder for B/T100/R100/chemeleon (with the encoder frozen
-nothing can be "unlearned", so a tailored encoder should matter most — the most direct test
-of the mechanism); 64-step budget at N ≤ 64 (does a longer small-N budget separate arms?).
-Per-task tailored sets (Ames-only / LD50-only selection) were cancelled: OpenADMET's sweep
-already establishes robustness to target choice.
+**Random-initialized encoder (`rand`, no pretraining, same ladder).** Pretraining is clearly
+detectable from N = 32–64 upward: B − rand = +0.07 AUC at N = 64–128 and +0.03 at full on
+Ames; +0.04–0.06 MAE at N = 16–128 and +0.01 at full on LD50 (paired SE 0.01–0.02). The one
+exception is Ames at N = 16, where `rand` ≈ B (−0.02 ± 0.01): that cell cannot distinguish
+any encoder and is uninformative. So "all pretrained arms perform the same" is a statement
+about encoders that *are* distinguishable from no pretraining — the target set is irrelevant
+even where pretraining itself matters.
+
+**Second pretraining seeds (B_s1, T100_s1).** Pretraining-seed differences are small:
+B_s1 − B and T100_s1 − T100 lie within ±0.015 at every N (mostly < 0.01), the same scale as
+the T100 − B gap itself. The replicate contrast T100_s1 − B_s1 is ≈ 0 on Ames and slightly
+*negative* on LD50 at N = 16–32 (−0.017, −0.013; SE 0.006, 0.002). The primary result is not
+hiding under pretraining-seed noise.
+
+Public CheMeleon on Ames at N = 16–32 is the one cell where a pretraining-side effect shows
+(+0.03 over our B, which is indistinguishable from `rand` there): something about the
+original pretraining (molecules, length) helps at ultra-low N that our 200k recipe does not
+reproduce. Worth carrying into the lite project; it is not a descriptor-targets effect.
+
+*Pending — appended when scored:* frozen-encoder ladder for B/T100/R100/chemeleon (with the
+encoder frozen nothing can be "unlearned", so a tailored encoder should matter most — the most
+direct test of the mechanism); 64-step budget at N ≤ 64 (does a longer small-N budget separate
+arms?). Per-task tailored sets (Ames-only / LD50-only selection) were cancelled: OpenADMET's
+sweep already establishes robustness to target choice.
 
 ## Caveats
 
