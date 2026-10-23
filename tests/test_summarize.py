@@ -109,3 +109,32 @@ def test_evr_weighted_uses_eligible_only():
 def test_agreement():
     assert S.agree("uniform", "uniform") == "uniform"
     assert S.agree("uniform", "little_drift") == "split"
+
+
+def test_score_gaps_match_seeds_and_drop_nan():
+    rows = [dict(task="T", regime="full", mode="ft", seed=s, ckpt="es", metric="r", score=v, direction="max")
+            for s, v in ((1, 0.9), (2, 0.8), (3, 0.1))]
+    rows += [dict(task="T", regime="full", mode="frozen", seed=s, ckpt="es", metric="r", score=v, direction="max")
+             for s, v in ((1, 0.7), (2, 0.5))]
+    g = S.score_gaps(pd.DataFrame(rows)).iloc[0]
+    assert g.gap_n_seeds == 2
+    assert g.gap == pytest.approx(0.25)  # seed 3 (unmatched) ignored
+    assert g.gap_sd == pytest.approx(np.sqrt((pd.Series([0.9, 0.8]).var() + pd.Series([0.7, 0.5]).var()) / 2))
+    rows[0]["score"] = np.nan
+    assert S.score_gaps(pd.DataFrame(rows)).iloc[0].gap_n_seeds == 1
+
+
+def test_drift_fraction_uses_common_eligible_descriptors():
+    long, fam, eta, pos, scores = synthetic({"A": set(), "B": set(), "C": set()})
+    # make ft task_clean ineligible on d0 and give d0 an extreme value; rand ineligible on d2
+    m = (long.task == "A") & (long.probe_set == "task_clean") & (long.encoder == "ft") & (long.descriptor == "d0")
+    long.loc[m & (long.measure == "dropped"), "value"] = np.nan
+    long.loc[m & (long.measure == "delta_r2_mean"), "value"] = -9.0
+    r = (long.task == "A") & (long.probe_set == "task_all") & (long.encoder == "rand") & (long.descriptor == "d2")
+    long.loc[r & (long.measure == "dropped"), "value"] = np.nan
+    long.loc[r & (long.measure == "delta_r2_mean"), "value"] = -9.0
+    pt = S.per_task_summary(long, fam, eta, pos, scores, n_train={}, es_epochs={})
+    row = pt[(pt.task == "A") & (pt.probe_set == "task_clean")].iloc[0]
+    assert row.drift_n_common == 1  # only d1 eligible in both
+    assert row.drift_median_ft == pytest.approx(-0.01) and row.drift_median_rand == pytest.approx(-0.4)
+    assert row.drift_fraction == pytest.approx(0.025)

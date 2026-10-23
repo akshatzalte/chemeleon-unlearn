@@ -58,18 +58,22 @@ def evr_weighted(delta: pd.Series, dropped: pd.Series, evr: pd.Series) -> float:
 
 def score_gaps(scores: pd.DataFrame) -> pd.DataFrame:
     """Per task x regime x ckpt: ft - frozen test-score gap, sign-normalised so positive = ft better.
-    gap = mean over seeds; gap_sd = pooled seed-SD (sqrt of mean of the ft and frozen score variances)."""
+    gap = mean over seed-matched (ft, frozen) pairs with finite scores; gap_sd = pooled seed-SD over the matched seeds
+    (sqrt of mean of the ft and frozen score variances)."""
     if scores is None or scores.empty:
         return pd.DataFrame(columns=["task", "regime", "ckpt", "gap", "gap_sd", "gap_n_seeds", "gap_metric"])
     out = []
     for (t, r, c), g in scores.groupby(["task", "regime", "ckpt"]):
-        ft, fr = g[g["mode"] == "ft"], g[g["mode"] == "frozen"]
-        if ft.empty or fr.empty:
+        ft = g[g["mode"] == "ft"][["seed", "score"]]
+        fr = g[g["mode"] == "frozen"][["seed", "score"]]
+        m = ft.merge(fr, on="seed", suffixes=("_ft", "_fr"))  # match seeds
+        m = m[np.isfinite(m["score_ft"]) & np.isfinite(m["score_fr"])]
+        if m.empty:
             continue
         sign = 1.0 if g["direction"].iloc[0] == "max" else -1.0
-        sd = np.sqrt((ft["score"].var(ddof=1) + fr["score"].var(ddof=1)) / 2) if min(len(ft), len(fr)) > 1 else np.nan
-        out.append(dict(task=t, regime=r, ckpt=c, gap=sign * (ft["score"].mean() - fr["score"].mean()), gap_sd=sd,
-                        gap_n_seeds=min(len(ft), len(fr)), gap_metric=g["metric"].iloc[0]))
+        sd = np.sqrt((m["score_ft"].var(ddof=1) + m["score_fr"].var(ddof=1)) / 2) if len(m) > 1 else np.nan
+        out.append(dict(task=t, regime=r, ckpt=c, gap=sign * (m["score_ft"] - m["score_fr"]).mean(), gap_sd=sd,
+                        gap_n_seeds=len(m), gap_metric=g["metric"].iloc[0]))
     return pd.DataFrame(out, columns=["task", "regime", "ckpt", "gap", "gap_sd", "gap_n_seeds", "gap_metric"])
 
 
@@ -102,6 +106,23 @@ def _anchor_table(long: pd.DataFrame) -> pd.DataFrame:
     sp = L[(L["measure"] == "cka_seedpair") & (L["encoder"] == "rand")].groupby(["task", "probe_set"])["value"].mean().rename("rand_cka_seedpair")
     a = pd.concat([med, cka, sp], axis=1).reset_index()
     return a.rename(columns={"task": "a_task", "probe_set": "a_probe_set"})
+
+
+def _common_medians(el: pd.DataFrame, long: pd.DataFrame) -> pd.DataFrame:
+    """Per view: median dR2 of ft and of the rand anchor over descriptors eligible in BOTH."""
+    d = long[(long["encoder"] == "rand") & (long["descriptor"] != "") & long["measure"].isin(["delta_r2_mean", "dropped"])]
+    w = d.set_index(["task", "probe_set", "descriptor", "measure"])["value"].unstack("measure")
+    cols = KEYS + ["drift_median_ft", "drift_median_rand", "drift_n_common"]
+    if w.empty:
+        return pd.DataFrame(columns=cols)
+    w = w[w["dropped"].notna()]["delta_r2_mean"].rename("rand_dr2").reset_index().rename(columns={"task": "a_task", "probe_set": "a_probe_set"})
+    e = el[KEYS + ["descriptor", "delta_r2_mean"]].copy()
+    e["a_task"] = np.where(e["probe_set"].str.startswith("pubchem"), "", e["task"])
+    e["a_probe_set"] = e["probe_set"].map(anchor_probe_set)
+    m = e.merge(w, on=["a_task", "a_probe_set", "descriptor"], how="inner")
+    g = m.groupby(KEYS)
+    return pd.DataFrame({"drift_median_ft": g["delta_r2_mean"].median(), "drift_median_rand": g["rand_dr2"].median(),
+                         "drift_n_common": g.size()}).reset_index()
 
 
 def per_task_summary(long, families, eta2, posctrl, scores, n_train: dict, es_epochs: dict) -> pd.DataFrame:
@@ -177,7 +198,12 @@ def per_task_summary(long, families, eta2, posctrl, scores, n_train: dict, es_ep
     for col in ("rand_median_dr2", "rand_cka", "rand_cka_seedpair"):
         if col not in pt:
             pt[col] = np.nan
-    pt["drift_fraction"] = [drift_fraction(a, b) for a, b in zip(pt["median_dr2"], pt["rand_median_dr2"])]
+    pt = pt.merge(_common_medians(el, long), on=KEYS, how="left")
+    for col in ("drift_median_ft", "drift_median_rand"):
+        if col not in pt:
+            pt[col] = np.nan
+    # both medians over descriptors eligible in the ft view AND the rand anchor view
+    pt["drift_fraction"] = [drift_fraction(a, b) for a, b in zip(pt["drift_median_ft"], pt["drift_median_rand"])]
     # branch (needs eta2, i.e. pubchem / task_all / task_clean views)
     for col in ("gap", "gap_sd"):
         if col not in pt:
