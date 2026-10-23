@@ -13,10 +13,11 @@ from pathlib import Path
 
 import pandas as pd
 
-from drift.config import RESULTS
+from drift.config import RESULTS, RUNS
 from drift.phase2 import analysis as A
 
 OUT = RESULTS / "phase2"
+EXPECTED_DONE = 784  # len(ladder.worklist()): 2 tasks x 8 arms x 49 (N, seed) combinations
 SECONDARY = (("T100", "T25"),)
 
 
@@ -48,6 +49,9 @@ def _fmt(x, nd=4):
 def summary_md(ep: dict, table: pd.DataFrame, scores: pd.DataFrame) -> str:
     L = ["# Phase 2: tailored-descriptor pretraining, ladder summary", ""]
     L.append(f"Primary endpoint (T100 - B, es checkpoint, spec §7): **{'SUCCESS' if ep['success'] else 'NOT MET'}**")
+    if not ep.get("complete_pairs", True):
+        L.append("")
+        L.append("**WARNING: paired scores incomplete or subsample hashes differ (--allow-incomplete); endpoint not final.**")
     L.append("")
     L.append("| task | points gap>SD (of N=16,32,64) | Spearman(gap, log N) | mean gap N<=64 | mean gap N>=512 | "
              "small>large | sizes | success |")
@@ -87,13 +91,26 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--scores", default=str(OUT / "scores.parquet"))
     ap.add_argument("--out", default=str(OUT))
+    ap.add_argument("--allow-incomplete", action="store_true",
+                    help="compute the endpoint although paired scores are missing / subsamples differ "
+                         "(stamps endpoint.json complete_pairs=false)")
     args = ap.parse_args()
     out = Path(args.out)
-    out.mkdir(parents=True, exist_ok=True)
     scores = pd.read_parquet(args.scores)
+    n_done = sum(1 for _ in (RUNS / "phase2" / "ladder").glob("*/*/*/done.json"))
+    chk, complete = A.check_endpoint_pairs(scores)
+    print(f"done.json under runs/phase2/ladder: {n_done} (expected {EXPECTED_DONE})")
+    print(f"endpoint pair check ({' vs '.join(A.PRIMARY)}, es): paired scores per (task, N), identical subsample_sha1")
+    print(chk.to_string(index=False))
+    if not complete:
+        print("INCOMPLETE: " + ("continuing (--allow-incomplete)" if args.allow_incomplete else "refusing to compute the endpoint"))
+        if not args.allow_incomplete:
+            return 2
+    out.mkdir(parents=True, exist_ok=True)
     table = contrast_table(scores)
     table.to_csv(out / "gaps.csv", index=False)
     ep = A.endpoint(scores)
+    ep["complete_pairs"] = complete
     (out / "endpoint.json").write_text(json.dumps(_nan_to_none(ep), indent=2))
     A.curves(scores, out / "curves.png")
     (out / "summary.md").write_text(summary_md(ep, table, scores))

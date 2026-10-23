@@ -18,7 +18,8 @@ def _seeds(n):
 
 def _rows(task, arm, n, seed, score, ckpt="es"):
     metric, direction = ("roc_auc", "max") if task == AMES else ("mean_absolute_error", "min")
-    return dict(task=task, arm=arm, N=n, seed=seed, ckpt=ckpt, metric=metric, direction=direction, score=score)
+    return dict(task=task, arm=arm, N=n, seed=seed, ckpt=ckpt, metric=metric, direction=direction, score=score,
+                subsample_sha1=f"sha-{task}-{n}-{seed}")
 
 
 def _table(gap_by_n, noise=0.01, tasks=(AMES, LD50)):
@@ -191,3 +192,95 @@ def test_score_script_selects_unscored_finished_runs(tmp_path, monkeypatch):
     have = {("tdcommons/ames", "B", "16", 42, "es"), ("tdcommons/ames", "B", "full", 42, "es")}
     todo = sc.todo_for("tdcommons/ames", have)
     assert [(t["run"]["N"], t["ckpt"]) for t in todo] == [("full", "last")]
+
+
+# ------------------------------------------------------------------------------------- endpoint guards
+def test_pair_check_passes_on_complete_table():
+    chk, ok = A.check_endpoint_pairs(_table(DECREASING))
+    assert ok and chk.ok.all() and len(chk) == 2 * len(SIZES)
+    assert dict(zip(chk[chk.task == AMES].N, chk[chk.task == AMES].paired)) == A.EXPECTED_PAIRS
+    assert A.EXPECTED_PAIRS == {"16": 10, "32": 10, "64": 10, "128": 5, "256": 5, "512": 3, "1024": 3, "full": 3}
+    assert (chk.sha_bad == 0).all()
+
+
+def test_pair_check_missing_pair_fails():
+    t = _table(DECREASING)
+    t = t.drop(t[(t.task == LD50) & (t.arm == "T100") & (t.N == "16") & (t.seed == 42)].index)  # T100 lacks a seed
+    t = t.drop(t[(t.task == AMES) & (t.arm == "B") & (t.N == "512") & (t.seed == 2042)].index)  # B lacks a seed
+    chk, ok = A.check_endpoint_pairs(t)
+    assert not ok
+    bad = chk[~chk.ok].set_index(["task", "N"])
+    assert set(bad.index) == {(LD50, "16"), (AMES, "512")}
+    assert bad.loc[(LD50, "16"), "paired"] == 9 and bad.loc[(AMES, "512"), "paired"] == 2
+    assert bad.loc[(LD50, "16"), "n_T100"] == 9 and bad.loc[(LD50, "16"), "n_B"] == 10
+
+
+def test_pair_check_missing_size_and_unpaired_extra_row():
+    t = _table(DECREASING)
+    chk, ok = A.check_endpoint_pairs(t[t.N != "full"])
+    assert not ok and chk[~chk.ok].N.tolist() == ["full", "full"]
+    extra = pd.DataFrame([_rows(AMES, "T100", "16", 99999, 0.5)])  # T100-only seed: counted unpaired, not paired
+    chk, ok = A.check_endpoint_pairs(pd.concat([_table(DECREASING), extra], ignore_index=True))
+    r = chk[(chk.task == AMES) & (chk.N == "16")].iloc[0]
+    assert ok and r.paired == 10 and r.n_T100 == 11 and r.n_B == 10
+
+
+def test_pair_check_sha_mismatch_fails():
+    t = _table(DECREASING)
+    i = t[(t.task == AMES) & (t.arm == "T100") & (t.N == "32") & (t.seed == 1042)].index
+    t.loc[i, "subsample_sha1"] = "different"
+    chk, ok = A.check_endpoint_pairs(t)
+    r = chk[(chk.task == AMES) & (chk.N == "32")].iloc[0]
+    assert not ok and r.sha_bad == 1 and not r.ok and r.paired == 10
+    assert chk[~chk.ok].shape[0] == 1
+    # a third arm with a different sha for the same subsample is also caught
+    t3 = pd.concat([_table(DECREASING), pd.DataFrame([{**_rows(AMES, "D535", "16", 42, 0.6), "subsample_sha1": "x"}])])
+    assert not A.check_endpoint_pairs(t3)[1]
+    # missing sha (None) is a failure too; so is a table without the column
+    t4 = _table(DECREASING)
+    t4.loc[t4.index[0], "subsample_sha1"] = None
+    assert not A.check_endpoint_pairs(t4)[1]
+    assert not A.check_endpoint_pairs(_table(DECREASING).drop(columns="subsample_sha1"))[1]
+
+
+def _scores_file(tmp_path, table):
+    p = tmp_path / "scores.parquet"
+    table.to_parquet(p)
+    return p
+
+
+def _analyze(tmp_path, monkeypatch, table, *flags, n_done=784):
+    an = _load_script("p2_05_analyze")
+    runs = tmp_path / "runs"
+    for k in range(n_done):
+        d = runs / "phase2" / "ladder" / "t" / "B" / f"N{k}_s0"
+        d.mkdir(parents=True)
+        (d / "done.json").write_text("{}")
+    monkeypatch.setattr(an, "RUNS", runs)
+    monkeypatch.setattr("sys.argv", ["p2_05", "--scores", str(_scores_file(tmp_path, table)), "--out", str(tmp_path / "out"),
+                                     *flags])
+    return an
+
+
+def test_analyze_script_stamps_complete_pairs(tmp_path, monkeypatch, capsys):
+    import json
+
+    an = _analyze(tmp_path, monkeypatch, _table(DECREASING), n_done=5)
+    assert an.main() == 0
+    out = capsys.readouterr().out
+    assert "done.json under runs/phase2/ladder: 5 (expected 784)" in out and "paired" in out
+    assert json.loads((tmp_path / "out" / "endpoint.json").read_text())["complete_pairs"] is True
+
+
+def test_analyze_script_refuses_incomplete_unless_overridden(tmp_path, monkeypatch, capsys):
+    import json
+
+    t = _table(DECREASING)
+    t = t[~((t.task == AMES) & (t.arm == "T100") & (t.N == "16") & (t.seed == 42))]
+    an = _analyze(tmp_path, monkeypatch, t)
+    assert an.main() != 0
+    assert "INCOMPLETE" in capsys.readouterr().out and not (tmp_path / "out" / "endpoint.json").exists()
+    (tmp_path / "again").mkdir()
+    an = _analyze(tmp_path / "again", monkeypatch, t, "--allow-incomplete", n_done=0)
+    assert an.main() == 0
+    assert json.loads((tmp_path / "again" / "out" / "endpoint.json").read_text())["complete_pairs"] is False

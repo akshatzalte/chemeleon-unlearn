@@ -77,6 +77,34 @@ def gaps(scores: pd.DataFrame, arm_a: str, arm_b: str, ckpt: str = "es") -> pd.D
     return _gaps_from(_prepare(scores, ckpt), arm_a, arm_b)
 
 
+# Paired es scores required per (task, N) for the pre-registered endpoint (ladder.SEEDS_FOR, as strings).
+EXPECTED_PAIRS = {"16": 10, "32": 10, "64": 10, "128": 5, "256": 5, "512": 3, "1024": 3, "full": 3}
+
+
+def check_endpoint_pairs(scores: pd.DataFrame, arms=PRIMARY, ckpt: str = "es") -> tuple[pd.DataFrame, bool]:
+    """Completeness guard for the primary endpoint. Per (task, N): `paired` = seeds scored for BOTH endpoint arms,
+    n_<arm> = rows per arm, `sha_bad` = (task, N, seed) groups whose `subsample_sha1` is missing or differs between
+    any of the arms in the table (the arms must have been fine-tuned on the identical rows), `ok` = paired equals
+    EXPECTED_PAIRS[N] and sha_bad == 0. Returns (table, all ok)."""
+    d = _prepare(scores, ckpt)
+    if "subsample_sha1" not in d.columns:
+        d["subsample_sha1"] = None
+    flag = d.groupby(["task", "N", "seed"])["subsample_sha1"].agg(lambda x: bool(x.isna().any() or x.nunique() > 1))
+    sha_bad_by = flag[flag].reset_index().groupby(["task", "N"]).size()
+    rows = []
+    for task in TASKS:
+        for n in N_ORDER:
+            dn = d[(d.task == task) & (d.N == n)]
+            seeds = {a: set(dn[dn.arm == a].seed) for a in arms}
+            paired = len(set.intersection(*seeds.values()))
+            sha_bad = int(sha_bad_by.get((task, n), 0))
+            rows.append(dict(task=task, N=n, expected=EXPECTED_PAIRS[n], paired=paired,
+                             **{f"n_{a}": int((dn.arm == a).sum()) for a in arms}, sha_bad=sha_bad,
+                             ok=paired == EXPECTED_PAIRS[n] and sha_bad == 0))
+    chk = pd.DataFrame(rows)
+    return chk, bool(chk.ok.all())
+
+
 def _task_endpoint(g: pd.DataFrame) -> dict:
     gap = g.set_index("N")["gap"]
     sd = g.set_index("N")["sd"]
