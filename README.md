@@ -1,66 +1,228 @@
-# chemeleon-unlearn
+# Does fine-tuning *unlearn* descriptor pretraining — and would task-tailored descriptor targets give better low-data models?
 
-Does fine-tuning a descriptor-pretrained molecular foundation model "unlearn" what
-pretraining taught — and would pretraining on a **task-tailored descriptor set** give better
-models in the low-data regime?
+A two-phase study on [CheMeleon](https://github.com/JacksonBurns/CheMeleon), a Chemprop
+D-MPNN pretrained to predict 1613 Mordred descriptors on ~1M PubChem molecules, using the 28
+Polaris/TDC benchmarks from the CheMeleon paper. Everything here — design docs, plans, code,
+build ledgers with every decision, and results — is in this repository.
 
-This repository tests that hypothesis on [CheMeleon](https://github.com/JacksonBurns/CheMeleon),
-a Chemprop D-MPNN pretrained to predict 1613 Mordred descriptors, using the 28 Polaris/TDC
-benchmarks from the CheMeleon paper.
+**Short version.** Fine-tuning does erode some of what pretraining taught (phase 1), but what
+is erased is mostly the same for every task, and *which* descriptors the encoder was
+pretrained to predict makes no detectable difference to downstream performance at any
+training-set size (phase 2). 25 randomly chosen real descriptors pretrain an encoder as good
+as all 1613; a 200k-molecule, one-GPU, one-hour run matches the public 1M-molecule model.
+The "task-tailored descriptor targets" idea is closed; the positive by-product is a very cheap
+pretraining recipe and the finding that the pretraining *target set* is not a lever.
 
-## Phase 1 — encoder-drift check (complete)
+---
 
-Fine-tune CheMeleon on all 28 tasks (full data and 128 molecules, fine-tuned and
-frozen-encoder, 3 seeds), then probe every encoder for the 1613 descriptors with an exact
-ridge probe on held-out PubChem molecules and on each task's own molecules.
+## 1. The hypothesis
 
-Headline (`docs/results/2026-10-22-drift-findings.md`):
-- Full-data fine-tuning erodes ~16% of the descriptor information pretraining added over a
-  random encoder; at 128 molecules the encoder barely moves.
-- ~80% of *what* is lost is the same for every task (cross-task Spearman 0.81); a
-  reproducible task-specific component explains ~18% of the variance.
-- Almost no descriptor becomes *more* recoverable after fine-tuning; loss concentrates in
-  low-variance detail (ring counts, topological charge, autocorrelations).
-- The descriptors fine-tuning generically preserves are the least task-relevant ones.
+CheMeleon's pretraining target is enormous and redundant: 1613 descriptors, of which 606 are
+autocorrelations and two correlation clusters alone are "molecular size". The hypothesis:
 
-Design: `docs/specs/2026-10-22-encoder-drift-check-design.md`; plan:
-`docs/plans/2026-10-22-encoder-drift-check.md`; build ledger with every ruling:
-`docs/results/2026-10-22-phase1-build-ledger.md`.
+> Pretraining bakes in information that is irrelevant or harmful for a given downstream
+> task. Fine-tuning must *unlearn* it, and with little data there is not enough signal to do
+> so. Pretraining on a **task-tailored descriptor set** should therefore give better models,
+> with the advantage largest in the low- and ultra-low-data regime.
 
-## Phase 2 — tailored-descriptor pretraining (in progress)
+Two testable premises follow, and each phase tests one:
 
-Re-pretrain CheMeleon-style encoders with one pipeline on five target sets — all 1613,
-25 and 100 tailored (label-relevance, one representative per correlation cluster), and
-size-matched random sets — then fine-tune on Ames and LD50 across a paired downsampling
-ladder (16 → full). Pre-registered endpoint: tailored − all at N ≤ 64.
+1. **Phase 1 — does fine-tuning actually unlearn, and is what it unlearns task-specific?**
+   If the encoder barely moves, or if every task forgets the same things, there is nothing to
+   tailor.
+2. **Phase 2 — does pretraining on a tailored target set help, especially at low N?**
+   With the proper controls: all 1613, a size-matched *random* set, a never-pretrained
+   encoder, and the public model.
 
-Design: `docs/specs/2026-10-22-phase2-tailored-pretraining-design.md`; plan:
-`docs/plans/2026-10-22-phase2-tailored-pretraining.md`.
+Terminology used throughout: *targets* are the descriptor columns an encoder is pretrained to
+predict; the *featurizer* is the atom/bond input encoding of the graph (Chemprop V2 multi-hot
+in every model here). Only targets were varied.
 
-## Layout
+---
 
-```
-src/drift/        package: tasks, encoders, finetune, descriptors, probe, stats, measure, score, summarize, phase2/
-scripts/          numbered pipeline stages (00–06 phase 1, p2_* phase 2)
-tests/            pytest (phase-1 suite runs in the chemprop 2.2.4 env)
-docs/specs|plans  design documents and implementation plans
-docs/results      findings notes, summary tables, figures
-```
+## 2. Phase 1 — encoder-drift check
 
-Environments: `environment.yml` (phase 1 / fine-tuning: chemprop 2.2.4, polaris-lib 0.12.1)
-and `environment-pretrain.yml` (phase 2 pretraining: chemprop 2.3.1 + cuik-molmaker).
-Large data, run outputs and raw results are not tracked.
+**Design:** `docs/specs/2026-10-22-encoder-drift-check-design.md` · **Findings:**
+`docs/results/2026-10-22-drift-findings.md` · tables/figures: `docs/results/summary/`
 
-## Reproducing
+### Pipeline
 
 ```
+Polaris 28 tasks ──► fine-tune CheMeleon ──► 324 encoders ──► linear probe for 1613 descriptors ──► drift measures
+  (cached once)      full data | 128 mols       (es, last)      on 10k held-out PubChem molecules      CKA, ΔR² per descriptor,
+                     fine-tuned | frozen         + test preds    + each task's own molecules            drop calls, η² family test,
+                     3 seeds, paper protocol                     (exact ridge, paired bootstrap)        PCA view, novel/seen views
+```
+
+- **Fine-tuning** reproduces the paper's protocol (astartes 80/20 split, 256-hidden head,
+  50 epochs, patience-5 early stopping). Each run keeps the early-stopped (`es`) and
+  epoch-50 (`last`) encoder. A frozen-encoder variant tells whether moving the encoder helps.
+  Test scores land within 1 SD of the paper's 5-seed range in 77/84 runs.
+- **Probing.** For every encoder (pretrained, 3 random, each fine-tuned one) the same exact
+  ridge probe maps the 2048-d embedding to each descriptor. R² is measured on 2k PubChem
+  molecules CheMeleon never trained on, and out-of-fold on each task's own training
+  molecules (restricted to rows the fine-tuned model never took gradient steps on). The
+  random-weight encoder marks the floor (median R² 0.59 — a D-MPNN recovers many descriptors
+  with no training at all), the pretrained one the ceiling (0.94); differences are read as
+  a fraction of that gap.
+- **Statistics.** Paired bootstrap (pretrained vs fine-tuned on identical resampled rows); a
+  descriptor is "dropped" if ΔR² < 0 in all 3 seeds, below −3 SE and below −0.05; descriptor
+  families via Mordred module and |ρ| ≥ 0.9 correlation clusters (535 of them); a PCA view to
+  avoid double-counting; pretraining-overlap views (35% of task molecules were in CheMeleon's
+  pretraining set).
+
+### Results
+
+| | Full data | 128 molecules |
+|---|---|---|
+| CKA vs pretrained (PubChem / task molecules) | 0.85 / 0.74 | 0.88 / 0.76 |
+| Median descriptor ΔR² | −0.04 | −0.02 |
+| Descriptors "dropped" | 25–32% | 6–12% |
+| Share of pretraining-added information lost | **~16%** | ~8% |
+
+- **What is lost is ~80% the same across tasks** (cross-task Spearman 0.81 vs 0.95 between
+  seeds of one task). A reproducible task-specific component explains ~18% of the variance.
+- **Nothing improves.** At most 2 descriptors per task become more recoverable; the
+  label-correlated descriptors lose R² like everything else.
+- **Loss sits in the fine detail**: PCs 1–10 lose 0.03, the tail loses 0.13; most eroded
+  families are the ones pretraining taught most (ring counts, topological charge,
+  autocorrelations).
+- The descriptors fine-tuning generically *preserves* are the least task-relevant ones.
+
+![PC spectrum](docs/results/summary/pc_spectrum.png)
+
+Read for the hypothesis: fine-tuning erodes pretraining detail, generically; at 128
+molecules it barely moves the encoder. That was a warning sign for "tailoring", but not a
+refutation — so phase 2 tested it directly.
+
+---
+
+## 3. Phase 2 — tailored-target pretraining
+
+**Design:** `docs/specs/2026-10-22-phase2-tailored-pretraining-design.md` · **Findings:**
+`docs/results/2026-10-23-phase2-findings.md` · tables/figures: `docs/results/phase2/`
+
+### Choosing the tailored set
+
+Phase 1's "what gets forgotten" signal was too unstable to define a set (Jaccard 0.15–0.6
+across checkpoints/views), so the tailored set uses **label relevance at cluster level**:
+rank the 535 correlation clusters by how well their members predict the Ames and LD50
+training labels (CV AUC / R²), keep the top k clusters, one representative descriptor each.
+A shallow-FFN check confirmed the sets *carry* the task information (100 tailored
+descriptors beat all 1613 as input features on LD50). Demo tasks: Ames mutagenicity and LD50
+acute toxicity — the most similar pair in phase 1 with only 22% shared molecules.
+
+### Arms (one pipeline; only the target set differs)
+
+| arm | targets | arm | targets |
+|---|---|---|---|
+| **B** | all 1613 | **R100 / R25a / R25b** | size-matched random real descriptors |
+| **T100 / T25** | tailored, top-100 / top-25 clusters | **D535** | one representative per cluster (dedup only) |
+| **chemeleon** | public weights (reference) | **rand** | random-init encoder, no pretraining |
+
+Pretraining: CheMeleon's published Zenodo descriptors (not recomputed), 200k PubChem
+molecules with the Ames/LD50 test molecules removed, D-MPNN 2048×6, masked-dropout MSE,
+one-cycle LR, patience 15, one RTX 4090 per arm (35–90 min each). Second pretraining seeds
+for B and T100 estimate pretraining variance.
+
+### Downsampling ladder
+
+N ∈ {16, 32, 64, 128, 256, 512, 1024, full}; 10/10/10/5/5/3/3/3 seeds; **one subsample per
+(task, N, seed) shared by every arm** (paired comparison; Ames stratified). N ≤ 64: fixed 16
+optimizer steps, batch min(N, 16). N ≥ 128: the paper protocol. Scored on the untouched
+Polaris test sets. Pre-registered endpoint: T100 − B at N ∈ {16, 32, 64}, success = better
+by more than the paired SD at ≥ 2 of 3 points in both tasks with the gap shrinking as N grows.
+
+### Results
+
+![Ladder curves](docs/results/phase2/curves.png)
+
+| task | T100 − B at N=16/32/64 (gap > SD?) | Spearman(gap, N) | verdict |
+|---|---|---|---|
+| Ames (ROC-AUC) | 0 / 3 | +0.12 | not met |
+| LD50 (MAE) | 0 / 3 | +0.14 | not met |
+
+- **Tailored ≈ all ≈ random.** T100 − B, T100 − R100 and B − chemeleon are all within noise
+  at every N. T25 is *worse* than both random-25 draws on Ames (−0.02 to −0.03 AUC) and ≈ equal
+  on LD50. With 10 paired seeds the detectable effect is ~0.02; smaller effects are not excluded.
+- **Pretraining itself is detectable** — the never-pretrained encoder is clearly worse from
+  N = 32–64 upward (+0.07 AUC / +0.05 MAE at N = 64–128) — so "all pretrained arms are equal"
+  is a statement about encoders that *do* differ from no pretraining.
+- **Pretraining-seed variance is small** (|B_s1 − B|, |T100_s1 − T100| ≤ 0.015), the same scale
+  as the tailored − all gap.
+- **200k molecules ≈ 1M.** Our B matches public CheMeleon across the ladder (|gap| ≤ 0.03;
+  N=full scores reproduce phase 1 within 0.01 on 5 of 6 seeds). The one pretraining-side effect
+  seen: public CheMeleon beats our B by +0.03 on Ames at N = 16–32, where B ≈ random-init.
+- One lead: deduplicated targets (D535) give the best LD50 at full data (MAE 0.517 ± 0.007 vs
+  0.546 ± 0.026) — untested further.
+
+**Why the feature-level selector did not transfer.** Descriptor relevance *as an input
+feature* and value *as a supervision signal* are different properties. Mordred is so
+redundant that any 25 real descriptors already demand the same general chemistry from the
+encoder; once it computes that, the task head finds what it needs during fine-tuning
+regardless of which targets were used.
+
+**Independent corroboration.** OpenADMET's
+[*Throwing Everything AND the Kitchen Sink at CheMeleon*](https://openadmet.ghost.io/throwing-everything-and-the-kitchen-sink-at-chemeleon/)
+(Aug 2026) swept 15 target sets at full data and found CheMeleon "robust to pre-training
+methodologies"; their positive signals were *relevant molecules* (a 40k analog set beat a
+10M diverse pool) and *property-like targets* (surrogate ADMET predictions, ~6%).
+
+### Still running (results appended when scored)
+
+- Frozen-encoder ladder (B, T100, R100, chemeleon) — with the encoder frozen nothing can be
+  unlearned, the most direct test of the mechanism; 64-step small-N budget.
+- **Full-pool rescue:** T100 and B pretrained on the full ~941k-molecule pool (T100_full,
+  B_full), targeting the one regime where pool size showed an effect.
+
+---
+
+## 4. What the project keeps, and what's next
+
+- A reproducible CheMeleon-style pretraining recipe: 200k molecules, 25–1613 targets,
+  ~1 GPU-hour, matching the public model downstream.
+- A paired downsampling-ladder harness with a pre-registered endpoint, and phase-1 probing
+  tools (exact ridge probe, paired bootstrap, drift measures).
+- Next direction: a **CheMeleon-lite** (fast to pretrain, small, little fine-tuning), with
+  the levers the evidence points to — use the descriptor head at fine-tuning, better
+  estimators on frozen embeddings, task-relevant *molecules* and *property-like* targets.
+
+---
+
+## 5. Repository map
+
+```
+docs/specs/      design documents (phase 1, phase 2) — the authority each plan argues from
+docs/plans/      implementation plans (task by task)
+docs/results/    findings notes, summary tables and figures, build ledgers with every ruling
+src/drift/       package: tasks, encoders, finetune, descriptors, probe, stats, measure, score, summarize
+src/drift/phase2 sets, pool, pretrain_data, pretrain, ladder, analysis
+scripts/         numbered pipeline stages: 00–06 (phase 1), p2_00–p2_06 (phase 2)
+tests/           pytest (phase-1 suite in the chemprop 2.2.4 env; phase-2 pretraining tests in the 2.3.1 env)
+```
+
+Two conda environments: `environment.yml` (fine-tuning/probing: chemprop 2.2.4, polaris-lib
+0.12.1, zarr<3) and `environment-pretrain.yml` (pretraining: chemprop 2.3.1 + cuik-molmaker,
+zarr 3). Large data, run outputs and raw results are not tracked.
+
+### Reproducing
+
+```bash
+# phase 1
 conda env create -f environment.yml && pip install -e .
 polaris login
 python scripts/00_fetch_tasks.py && python scripts/01_descriptors.py
-python scripts/02_finetune.py --gpu 0 --shard 0/2   # (and 1/2 on a second GPU)
+python scripts/02_finetune.py --gpu 0 --shard 0/2   # and --gpu 1 --shard 1/2
 python scripts/05_score.py
 python scripts/03_measure.py && python scripts/03_measure.py --combine
 python scripts/06_cka.py && python scripts/04_summarize.py
+
+# phase 2 (pretraining env for p2_01/p2_02)
+python scripts/p2_00_sets.py                               # target sets + FFN sanity gate
+$PY2 scripts/p2_01_pool.py                                 # pool from the Zenodo descriptors
+$PY2 scripts/p2_02_pretrain.py --arm B --gpu 0             # one arm per GPU, --patience 15
+python scripts/p2_03_ladder.py --gpu 0 --shard 0/2 --jobs-per-gpu 3
+python scripts/p2_04_score.py && python scripts/p2_05_analyze.py
 ```
 
 Cite CheMeleon (DOI 10.1021/acs.jcim.6c01546) when using the pretrained weights.
