@@ -33,13 +33,16 @@ def parse_args(argv=None):
     ap.add_argument("--seed", type=int, default=0, help="torch/lightning seed and the training-row permutation seed")
     ap.add_argument("--num-workers", type=int, default=4)
     ap.add_argument("--out", default=None)
+    ap.add_argument("--pool-dir", default=None, help="pool directory (default data/phase2/pool)")
+    ap.add_argument("--set-name", default=None, help="set file name to use (default: the arm name)")
     return ap.parse_args(argv)
 
 
 def main() -> int:
     args = parse_args()
     out = Path(args.out) if args.out else config.RUNS / "phase2" / "pretrain" / args.arm
-    info = pretrain.train(args.arm, POOL, SETS, out, args.gpu, args.max_epochs, args.limit_rows,
+    pool = Path(args.pool_dir) if args.pool_dir else POOL
+    info = pretrain.train(args.set_name or args.arm, pool, SETS, out, args.gpu, args.max_epochs, args.limit_rows,
                           args.patience, args.num_workers, args.seed)
     print(json.dumps({k: v for k, v in info.items() if k != "epoch_seconds"}, indent=2))
     return 0
