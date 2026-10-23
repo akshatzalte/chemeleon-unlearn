@@ -42,9 +42,11 @@ def build_sets(
     sets_json: Path,
     all_descriptors: list[str],
 ) -> dict[str, list[str]]:
-    """B (all descriptors), D535, T25/T100 (consensus top-k clusters), R25a/R25b/R100 (random clusters)."""
+    """B (all descriptors), D535, T25/T100 (consensus top-k clusters), R25a/R25b/R100 (random clusters),
+    T100_ames / T100_ld50 (per-task tailored: top-100 clusters by `auc_ames` / `r2_ld50` alone, same representatives)."""
     rep = representatives(sets_json, clusters_parquet)
-    rank = pd.read_csv(scores_csv, index_col=0).rank_consensus
+    scores = pd.read_csv(scores_csv, index_col=0)
+    rank = scores.rank_consensus
     out: dict[str, list[str]] = {"B": list(all_descriptors), "D535": [rep[c] for c in sorted(rep)]}
     for k in (25, 100):
         out[f"T{k}"] = [rep[int(c)] for c in rank.nlargest(k).index]
@@ -52,6 +54,8 @@ def build_sets(
     for name, k, seed in (("R25a", 25, 0), ("R25b", 25, 1), ("R100", 100, 0)):
         picked = np.random.default_rng(seed).choice(cluster_ids, k, replace=False)
         out[name] = [rep[int(c)] for c in picked]
+    for name, col in (("T100_ames", "auc_ames"), ("T100_ld50", "r2_ld50")):
+        out[name] = [rep[int(c)] for c in scores[col].nlargest(100).index]
     return out
 
 

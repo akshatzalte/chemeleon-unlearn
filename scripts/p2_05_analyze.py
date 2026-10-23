@@ -1,7 +1,8 @@
 """Phase 2, step 5: analysis of results/phase2/scores.parquet (run under $PY1; no Polaris needed).
 
-Writes results/phase2/{gaps.csv, endpoint.json, curves.png, summary.md}. gaps.csv holds every contrast
-(es and last checkpoints; gap > 0 = first arm better, sign-normalized). endpoint.json is the pre-registered
+Reads --scores (default results/phase2/scores.parquet), writes --out (default results/phase2)/
+{gaps.csv, endpoint.json, curves.png, summary.md}. Contrasts whose arms are absent from the score table are skipped
+with a note. gaps.csv holds every contrast (es and last checkpoints; gap > 0 = first arm better, sign-normalized). endpoint.json is the pre-registered
 primary endpoint (spec §7: T100 - B, es checkpoint).
 """
 from __future__ import annotations
@@ -21,16 +22,31 @@ EXPECTED_DONE = 784  # len(ladder.worklist()): 2 tasks x 8 arms x 49 (N, seed) c
 SECONDARY = (("T100", "T25"),)
 
 
-def contrast_table(scores: pd.DataFrame) -> pd.DataFrame:
+def contrast_table_and_notes(scores: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
+    """All contrasts with paired rows, plus one note per contrast that was skipped (an arm absent from the score table,
+    or no (task, N, seed) shared by the two arms). Missing arms are normal (e.g. a frozen ladder run on a subset)."""
     pairs = list(dict.fromkeys(list(A.CONTRASTS) + list(SECONDARY)))
-    frames = []
-    for ckpt in ("es", "last"):
-        for a, b in pairs:
+    have = set(scores["arm"])
+    frames, notes = [], []
+    for a, b in pairs:
+        absent = [x for x in (a, b) if x not in have]
+        if absent:
+            notes.append(f"{a}-{b}: skipped, arm(s) {', '.join(absent)} not in the score table")
+            continue
+        got = False
+        for ckpt in ("es", "last"):
             g = A.gaps(scores, a, b, ckpt=ckpt)
             if len(g):
+                got = True
                 frames.append(g.assign(contrast=f"{a}-{b}", ckpt=ckpt))
+        if not got:
+            notes.append(f"{a}-{b}: skipped, no paired (task, N, seed) rows")
     cols = ["contrast", "ckpt", "task", "N", "gap", "sd", "n", "se"]
-    return pd.concat(frames, ignore_index=True)[cols] if frames else pd.DataFrame(columns=cols)
+    return (pd.concat(frames, ignore_index=True)[cols] if frames else pd.DataFrame(columns=cols)), notes
+
+
+def contrast_table(scores: pd.DataFrame) -> pd.DataFrame:
+    return contrast_table_and_notes(scores)[0]
 
 
 def _nan_to_none(o):
@@ -46,7 +62,7 @@ def _fmt(x, nd=4):
     return "nan" if x != x else f"{x:.{nd}f}"
 
 
-def summary_md(ep: dict, table: pd.DataFrame, scores: pd.DataFrame) -> str:
+def summary_md(ep: dict, table: pd.DataFrame, scores: pd.DataFrame, notes: list[str] | None = None) -> str:
     L = ["# Phase 2: tailored-descriptor pretraining, ladder summary", ""]
     L.append(f"Primary endpoint (T100 - B, es checkpoint, spec §7): **{'SUCCESS' if ep['success'] else 'NOT MET'}**")
     if not ep.get("complete_pairs", True):
@@ -82,6 +98,8 @@ def summary_md(ep: dict, table: pd.DataFrame, scores: pd.DataFrame) -> str:
                 g = g.set_index("N")
                 cells = [f"{g.gap[n]:+.4f} +- {_fmt(g.se[n], 4)}" if n in g.index else "-" for n in ns]
                 L.append(f"| {c} | " + " | ".join(cells) + " |")
+    if notes:
+        L += ["", "## Skipped contrasts", ""] + [f"- {n}" for n in notes]
     n_pairs = scores.groupby(["task", "arm", "ckpt"]).size().unstack("ckpt").fillna(0).astype(int)
     L += ["", "## Score rows per (task, arm)", "", "```", n_pairs.to_string(), "```", ""]
     return "\n".join(L)
@@ -107,13 +125,15 @@ def main() -> int:
         if not args.allow_incomplete:
             return 2
     out.mkdir(parents=True, exist_ok=True)
-    table = contrast_table(scores)
+    table, notes = contrast_table_and_notes(scores)
+    for note in notes:
+        print("NOTE", note)
     table.to_csv(out / "gaps.csv", index=False)
     ep = A.endpoint(scores)
     ep["complete_pairs"] = complete
     (out / "endpoint.json").write_text(json.dumps(_nan_to_none(ep), indent=2))
     A.curves(scores, out / "curves.png")
-    (out / "summary.md").write_text(summary_md(ep, table, scores))
+    (out / "summary.md").write_text(summary_md(ep, table, scores, notes))
     print((out / "summary.md").read_text())
     return 0
 

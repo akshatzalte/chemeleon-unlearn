@@ -1,15 +1,18 @@
 """Phase 2, step 4: score finished ladder runs with Polaris (incremental). Run under $PY1; needs a Polaris login.
 
 Same protocol as scripts/05_score.py (benchmark.evaluate with the benchmark's main metric; cached test-SMILES
-order asserted against the Polaris test set), over runs/phase2/ladder/<slug>/<arm>/N<N>_s<seed>/.
+order asserted against the Polaris test set), over <root>/<slug>/<arm>/N<N>_s<seed>/ (--root, default runs/phase2/ladder; --out, default
+results/phase2/scores.parquet; e.g. --root runs/phase2/ladder_frozen --out results/phase2/scores_frozen.parquet).
 Rows are keyed by (task, arm, N, seed, ckpt); rows already in results/phase2/scores.parquet are kept, runs without
 done.json are skipped. `seed` is the run's fine-tuning seed (paired across arms by (task, N, seed)). `N` is stored
 as a string ('16', ..., 'full') so the parquet column is homogeneous. `pred_last.npy` exists only for N >= 128.
 """
 from __future__ import annotations
 
+import argparse
 import json
 import sys
+from pathlib import Path
 import traceback
 
 import numpy as np
@@ -24,9 +27,10 @@ CKPTS = {"es": "pred_es.npy", "last": "pred_last.npy"}
 OUT = RESULTS / "phase2" / "scores.parquet"
 
 
-def finished_runs(task: str) -> list[dict]:
+def finished_runs(task: str, root: Path | None = None) -> list[dict]:
+    root = Path(root) if root is not None else RUNS / "phase2" / "ladder"
     out = []
-    for done in sorted((RUNS / "phase2" / "ladder" / slug(task)).glob("*/N*_s*/done.json")):
+    for done in sorted((root / slug(task)).glob("*/N*_s*/done.json")):
         run = json.loads((done.parent / "run.json").read_text())
         assert run["task"] == task, f"{done.parent}: run.json task {run['task']!r} != {task!r}"
         run["dir"] = done.parent
@@ -35,11 +39,11 @@ def finished_runs(task: str) -> list[dict]:
     return out
 
 
-def todo_for(task: str, have: set) -> list[dict]:
+def todo_for(task: str, have: set, root: Path | None = None) -> list[dict]:
     """(run, ckpt) pairs not yet scored whose prediction file exists."""
     return [
         dict(run=r, ckpt=c)
-        for r in finished_runs(task)
+        for r in finished_runs(task, root)
         for c, f in CKPTS.items()
         if (task, r["arm"], r["N"], int(r["seed"]), c) not in have and (r["dir"] / f).exists()
     ]
@@ -73,13 +77,19 @@ def score_task(name: str, todo: list[dict]) -> list[dict]:
     return rows
 
 
-def main() -> int:
-    OUT.parent.mkdir(parents=True, exist_ok=True)
-    old = pd.read_parquet(OUT) if OUT.exists() else pd.DataFrame(columns=COLS)
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--root", default=None, help="ladder run root (default runs/phase2/ladder)")
+    ap.add_argument("--out", default=str(OUT), help="score parquet (default results/phase2/scores.parquet)")
+    args = ap.parse_args(argv)
+    root = Path(args.root) if args.root else None
+    out_path = Path(args.out)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    old = pd.read_parquet(out_path) if out_path.exists() else pd.DataFrame(columns=COLS)
     have = set(map(tuple, old[KEY].astype({"seed": int}).itertuples(index=False, name=None)))
     new_rows, failed = [], []
     for name in TASKS:
-        todo = todo_for(name, have)
+        todo = todo_for(name, have, root)
         if not todo:
             continue
         try:
@@ -92,8 +102,8 @@ def main() -> int:
     scores = pd.concat([old, pd.DataFrame(new_rows, columns=COLS)], ignore_index=True) if new_rows else old
     scores["N"] = scores["N"].astype(str)
     scores = scores.drop_duplicates(KEY, keep="last").sort_values(KEY).reset_index(drop=True)
-    scores.to_parquet(OUT)
-    print(f"{len(scores)} rows in {OUT}")
+    scores.to_parquet(out_path)
+    print(f"{len(scores)} rows in {out_path}")
     print(scores.groupby(["task", "arm", "ckpt"]).size().unstack("ckpt").to_string())
     if failed:
         print("failed tasks:", failed)

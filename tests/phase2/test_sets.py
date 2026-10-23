@@ -46,6 +46,21 @@ def test_R_sets_seeded(built, all_descriptors):
         assert again[k] == built[k]
 
 
+@pytest.mark.parametrize("name, col", [("T100_ames", "auc_ames"), ("T100_ld50", "r2_ld50")])
+def test_per_task_tailored_sets(built, all_descriptors, name, col):
+    rep = S.representatives(SETS_JSON, CLUSTERS)
+    sc = pd.read_csv(SCORES, index_col=0)
+    t = built[name]
+    assert len(t) == len(set(t)) == 100 and set(t) <= set(built["D535"])
+    assert t != built["T100"] and set(t) != set(built["T100"])  # differs from the consensus set
+    assert t == [rep[c] for c in sc[col].nlargest(100).index]  # that task's score alone, same representatives
+    assert S.build_sets(SCORES, CLUSTERS, SETS_JSON, all_descriptors)[name] == t  # deterministic
+    f = config.DATA / "phase2" / "sets" / f"{name}.txt"
+    if f.exists():  # written by the one-off generation (data/ is untracked)
+        assert f.read_text().split() == t
+    assert set(built["T100_ames"]) != set(built["T100_ld50"])
+
+
 def test_B_is_all_1613_in_module_order(built, all_descriptors):
     assert len(all_descriptors) == 1613
     assert built["B"] == all_descriptors

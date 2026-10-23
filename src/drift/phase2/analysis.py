@@ -27,8 +27,10 @@ MIN_POINTS = 2  # of the 3 small-N points, per task
 
 # (arm_a, arm_b) contrasts shown as gap panels; a - b > 0 means a is better.
 CONTRASTS = (("T100", "B"), ("T25", "B"), ("T100", "R100"), ("T25", "R25a"), ("T25", "R25b"), ("B", "chemeleon"),
-             ("B", "rand"))  # last contrast = own gap panel (row 4): pretraining vs a random-init encoder
-ARM_ORDER = ("B", "T25", "T100", "R25a", "R25b", "R100", "chemeleon", "D535", "rand")
+             ("B", "rand"),  # own gap panel (row 4): pretraining vs a random-init encoder
+             ("T100_ames", "B"), ("T100_ld50", "B"), ("T100_ames", "T100"), ("T100_ld50", "T100"))  # row 5: per-task sets
+CONTRAST_ROWS = (CONTRASTS[:3], CONTRASTS[3:6], CONTRASTS[6:7], CONTRASTS[7:])  # gap panels in curves(), rows 2-5
+ARM_ORDER = ("B", "T25", "T100", "R25a", "R25b", "R100", "chemeleon", "D535", "rand", "T100_ames", "T100_ld50")
 METRIC_LABEL = {"tdcommons/ames": "Ames ROC-AUC (higher better)", "tdcommons/ld50-zhu": "LD50 MAE (lower better)"}
 
 
@@ -152,9 +154,11 @@ def endpoint(scores: pd.DataFrame) -> dict:
 # --------------------------------------------------------------------------------------------- plotting
 # Reference categorical palette (dataviz skill, light mode), assigned in fixed entity order.
 _CAT = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300", "#6250d6", "#e34948"]
-ARM_COLOR = dict(zip(ARM_ORDER, _CAT))
-CONTRAST_COLOR = dict(zip(CONTRASTS, _CAT))
-ARM_COLOR["rand"] = CONTRAST_COLOR[("B", "rand")] = "#6b6a66"  # neutral grey: the no-pretraining baseline
+_CAT_EXTRA = ["#0a9396", "#9b2fae"]  # the per-task arms T100_ames, T100_ld50
+ARM_COLOR = {a: _CAT[i] for i, a in enumerate(ARM_ORDER[:8])}
+ARM_COLOR.update(zip(ARM_ORDER[8:], ["#6b6a66", *_CAT_EXTRA]))  # rand = neutral grey: the no-pretraining baseline
+CONTRAST_COLOR = {c: _CAT[i % len(_CAT)] for i, c in enumerate(CONTRASTS)}  # distinct within each panel row
+CONTRAST_COLOR[("B", "rand")] = ARM_COLOR["rand"]
 _INK, _INK2, _GRID, _SURFACE = "#0b0b0b", "#52514e", "#e4e3df", "#fcfcfb"
 _FULL_X = 4096  # x position of 'full' on the log axis (label only; the true row count is ~5.8-5.9k)
 
@@ -191,7 +195,7 @@ def _line(ax, xs, mean, se, color, label):
 
 
 def curves(scores: pd.DataFrame, out_png, ckpt: str = "es") -> None:
-    """Figure: row 1 = score vs N per arm (mean +- SE over seeds), rows 2-4 = paired gaps (sign-normalized,
+    """Figure: row 1 = score vs N per arm (mean +- SE over seeds), rows 2+ = paired gaps (sign-normalized,
     > 0 = first arm better, mean +- SE of the paired differences). One column per task."""
     import matplotlib
 
@@ -199,7 +203,10 @@ def curves(scores: pd.DataFrame, out_png, ckpt: str = "es") -> None:
     import matplotlib.pyplot as plt
 
     d = _prepare(scores, ckpt)
-    fig, axes = plt.subplots(4, len(TASKS), figsize=(11, 14), sharex="col", facecolor=_SURFACE)
+    rows = [r for k, r in enumerate(CONTRAST_ROWS)
+            if k < 3 or any(len(_gaps_from(d, a, b)) for a, b in r)]  # the tailored-arm row only when it has data
+    fig, axes = plt.subplots(1 + len(rows), len(TASKS), figsize=(11, 3.5 * (1 + len(rows))), sharex="col", facecolor=_SURFACE,
+                             squeeze=False)
     for j, task in enumerate(TASKS):
         ax = axes[0, j]
         dt = d[d.task == task]
@@ -209,7 +216,7 @@ def curves(scores: pd.DataFrame, out_png, ckpt: str = "es") -> None:
             se = (r["std"] / np.sqrt(r["count"])).to_numpy()
             _line(ax, [_x(n) for n in r.index], r["mean"].to_numpy(), se, ARM_COLOR[arm], arm)
         _style(ax, METRIC_LABEL[task], f"{task}: test score by fine-tuning set size (es)")
-        for k, row_contrasts in enumerate((CONTRASTS[:3], CONTRASTS[3:6], CONTRASTS[6:])):
+        for k, row_contrasts in enumerate(rows):
             ax = axes[1 + k, j]
             for ca, cb in row_contrasts:
                 g = _gaps_from(d, ca, cb)

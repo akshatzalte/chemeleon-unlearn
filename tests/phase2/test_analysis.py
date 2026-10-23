@@ -303,3 +303,92 @@ def test_analyze_script_refuses_incomplete_unless_overridden(tmp_path, monkeypat
     an = _analyze(tmp_path / "again", monkeypatch, t, "--allow-incomplete", n_done=0)
     assert an.main() == 0
     assert json.loads((tmp_path / "again" / "out" / "endpoint.json").read_text())["complete_pairs"] is False
+
+
+# ------------------------------------------------------------------------- tailored arms / absent arms / score --root
+def test_tailored_contrasts_and_arm_colors():
+    for c in (("T100_ames", "B"), ("T100_ld50", "B"), ("T100_ames", "T100"), ("T100_ld50", "T100"), ("B", "rand")):
+        assert c in A.CONTRASTS and A.CONTRAST_COLOR[c]
+    assert A.CONTRASTS.count(("B", "rand")) == 1
+    for a in ("rand", "T100_ames", "T100_ld50"):
+        assert a in A.ARM_ORDER and A.ARM_COLOR[a]
+    assert len(set(A.ARM_COLOR.values())) == len(A.ARM_ORDER)
+    assert sum(len(r) for r in A.CONTRAST_ROWS) == len(A.CONTRASTS)
+
+
+def _with_tailored(t):
+    ames = t[t.arm == "B"].assign(arm="T100_ames", score=lambda d: d.score + 0.01 * np.where(d.task == AMES, 1, -1))
+    return pd.concat([t, ames])
+
+
+def test_curves_adds_tailored_row_only_with_data(tmp_path):
+    import matplotlib.image as mpimg
+
+    t = _table(DECREASING)
+    a, b = tmp_path / "a.png", tmp_path / "b.png"
+    A.curves(t, a)
+    A.curves(_with_tailored(t), b)
+    assert mpimg.imread(b).shape[0] > mpimg.imread(a).shape[0]  # 5th row of gap panels
+    g = A.gaps(_with_tailored(t), "T100_ames", "B")
+    assert len(g) and (g.gap > 0).all() and A.gaps(_with_tailored(t), "T100_ld50", "B").empty
+
+
+def test_contrast_table_skips_absent_arms_with_notes():
+    an = _load_script("p2_05_analyze")
+    t = _with_tailored(_table(DECREASING))  # arms: B, T100, T100_ames only
+    table, notes = an.contrast_table_and_notes(t)
+    assert set(table.contrast) == {"T100-B", "T100_ames-B", "T100_ames-T100"}
+    skipped = {n.split(":")[0] for n in notes}
+    assert {"T25-B", "B-rand", "B-chemeleon", "T100_ld50-B", "T100_ld50-T100", "T100-T25"} <= skipped
+    assert all("not in the score table" in n for n in notes if n.startswith("T100_ld50-B"))
+    assert an.contrast_table(t).equals(table)
+    md = an.summary_md(A.endpoint(t), table, t, notes)
+    assert "## Skipped contrasts" in md and "T100_ld50-B: skipped" in md
+
+
+def test_analyze_script_runs_with_missing_arms(tmp_path, monkeypatch, capsys):
+    import json
+
+    t = _table(DECREASING)
+    t = t[t.arm == "B"].assign(arm="T100_ames")  # no T100 / chemeleon / ... : only B and T100_ames
+    t = pd.concat([_table(DECREASING)[lambda d: d.arm == "B"], t])
+    an = _analyze(tmp_path, monkeypatch, t, "--allow-incomplete", n_done=0)
+    assert an.main() == 0
+    out = capsys.readouterr().out
+    assert "NOTE T100-B: skipped" in out and "NOTE T100_ames-B" not in out
+    assert (tmp_path / "out" / "curves.png").exists() and (tmp_path / "out" / "gaps.csv").exists()
+    assert pd.read_csv(tmp_path / "out" / "gaps.csv").contrast.unique().tolist() == ["T100_ames-B"]
+    ep = json.loads((tmp_path / "out" / "endpoint.json").read_text())
+    assert ep["success"] is False and ep["complete_pairs"] is False
+    assert "## Skipped contrasts" in (tmp_path / "out" / "summary.md").read_text()
+
+
+def test_score_script_root_and_out_args(tmp_path, monkeypatch):
+    import json
+
+    sc = _load_script("p2_04_score")
+    monkeypatch.setattr(sc, "RUNS", tmp_path / "default_runs")
+    root = tmp_path / "ladder_frozen"
+
+    def mk(base, arm):
+        d = base / "tdcommons_ames" / arm / "N16_s0"
+        d.mkdir(parents=True)
+        (d / "run.json").write_text(json.dumps(dict(task="tdcommons/ames", arm=arm, N=16, seed=42, subsample_sha1="h")))
+        (d / "pred_es.npy").write_bytes(b"")
+        (d / "done.json").write_text("{}")
+
+    mk(root, "B")
+    mk(tmp_path / "default_runs" / "phase2" / "ladder", "T100")
+    assert [r["arm"] for r in sc.finished_runs("tdcommons/ames", root)] == ["B"]
+    assert [r["arm"] for r in sc.finished_runs("tdcommons/ames")] == ["T100"]  # default root unchanged
+    assert [t["run"]["arm"] for t in sc.todo_for("tdcommons/ames", set(), root)] == ["B"]
+    # main: --root/--out routing (scoring itself stubbed: no Polaris)
+    seen = {}
+    monkeypatch.setattr(sc, "score_task", lambda name, todo: seen.setdefault(name, todo) and [
+        dict(task=name, arm=t["run"]["arm"], N=t["run"]["N"], seed=int(t["run"]["seed"]), ckpt=t["ckpt"], metric="roc_auc",
+             direction="max", score=0.7, subsample_sha1="h") for t in todo])
+    out = tmp_path / "res" / "scores_frozen.parquet"
+    assert sc.main(["--root", str(root), "--out", str(out)]) == 0
+    df = pd.read_parquet(out)
+    assert df.arm.tolist() == ["B"] and df.N.tolist() == ["16"]
+    assert not sc.OUT.exists() or sc.OUT != out  # the default parquet was not touched

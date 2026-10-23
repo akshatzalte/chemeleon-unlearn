@@ -181,6 +181,64 @@ def test_run_json_records_sha_and_arm(ladder_env):
     assert info2["mp_path"] == str(config.CHEMELEON_MP)
 
 
+def test_run_dir_layout_by_mode_and_steps(ladder_env):
+    base = config.RUNS / "phase2"
+    t = "tdcommons/ames"
+    assert L.run_dir(t, "B", 16, 1) == base / "ladder" / "tdcommons_ames" / "B" / "N16_s1"  # ft layout untouched
+    assert L.run_dir(t, "B", 16, 1, "ft", 16) == L.run_dir(t, "B", 16, 1)
+    assert L.run_dir(t, "B", 16, 1, mode="frozen") == base / "ladder_frozen" / "tdcommons_ames" / "B" / "N16_s1"
+    assert L.run_dir(t, "B", 16, 1, steps=32) == base / "ladder_steps32" / "tdcommons_ames" / "B" / "N16_s1"
+    assert L.run_dir(t, "B", 16, 1, "frozen", 32) == base / "ladder_frozen_steps32" / "tdcommons_ames" / "B" / "N16_s1"
+    with pytest.raises(ValueError):
+        L.run_dir(t, "B", 16, 1, mode="nope")
+
+
+def test_pending_looks_in_the_run_dir_of_mode_and_steps(ladder_env):
+    items = [("tdcommons/ames", "chemeleon", 16, 0), ("tdcommons/ames", "chemeleon", 16, 1)]
+    for kw in ({}, dict(mode="frozen"), dict(steps=32)):
+        assert L.pending(items, **kw) == items
+    d = L.run_dir(*items[0], mode="frozen")
+    d.mkdir(parents=True)
+    (d / "done.json").write_text("{}")
+    assert L.pending(items, mode="frozen") == items[1:] and L.pending(items) == items and L.pending(items, steps=32) == items
+
+
+def test_run_item_frozen_and_steps_record_and_dirs(ladder_env):
+    t = fake_task_real_smiles(n=40, kind="classification")
+    L.make_subsamples(t, sizes=(16,), seeds_for={16: 1})
+    ft = L.run_item(t.name, "chemeleon", 16, 0, None, task_data=t)
+    assert ft["mode"] == "ft" and ft["fixed_steps"] == 16 and ft["n_steps"] == 16
+    fr = L.run_item(t.name, "chemeleon", 16, 0, None, task_data=t, mode="frozen", steps=8)
+    d = L.run_dir(t.name, "chemeleon", 16, 0, "frozen", 8)
+    assert d == config.RUNS / "phase2" / "ladder_frozen_steps8" / "fake_classification_real" / "chemeleon" / "N16_s0"
+    run = json.loads((d / "run.json").read_text())
+    assert run["mode"] == "frozen" and run["fixed_steps"] == run["n_steps"] == fr["n_steps"] == 8
+    assert run["batch_size"] == 16 and run["train_idx"] == ft["train_idx"] and run["subsample_sha1"] == ft["subsample_sha1"]
+    assert (d / "pred_es.npy").exists() and not (d / "es_mp.pt").exists()  # frozen: head only, encoder not re-saved
+    assert (L.run_dir(t.name, "chemeleon", 16, 0) / "es_mp.pt").exists()  # the ft run stays where it was
+    assert json.loads((L.run_dir(t.name, "chemeleon", 16, 0) / "run.json").read_text())["mode"] == "ft"
+
+
+def test_run_item_passes_mode_and_steps_to_run_one(ladder_env, monkeypatch):
+    t = fake_task_real_smiles(n=200, kind="regression")
+    L.make_subsamples(t, sizes=(32, 128), seeds_for={32: 1, 128: 1})
+    seen = []
+    monkeypatch.setattr(L, "run_one", lambda td, regime, mode, seed, d, **kw: seen.append((mode, d, kw)) or {})
+    L.run_item(t.name, "chemeleon", 32, 0, None, task_data=t, mode="frozen", steps=40)
+    L.run_item(t.name, "chemeleon", 128, 0, None, task_data=t, mode="frozen", steps=40)  # steps only affect N <= 64
+    (m1, d1, k1), (m2, d2, k2) = seen
+    assert m1 == m2 == "frozen" and k1["fixed_steps"] == 40 and k1["batch_size"] == 16
+    assert "fixed_steps" not in k2 and d1.parts[-4] == d2.parts[-4] == "ladder_frozen_steps40"
+
+
+def test_tailored_arms_follow_normal_readiness(ladder_env):
+    assert not L.arm_ready("T100_ames") and not L.arm_ready("T100_ld50")
+    _make_arm("T100_ames")
+    assert L.arm_ready("T100_ames") and not L.arm_ready("T100_ld50")
+    todo = L.pending(L.worklist(arms=("T100_ames", "T100_ld50")))
+    assert {a for _, a, _, _ in todo} == {"T100_ames"}
+
+
 def test_run_item_protocol_routing(ladder_env, monkeypatch):
     t = fake_task_real_smiles(n=200, kind="regression")
     L.make_subsamples(t, sizes=(32, 128, "full"), seeds_for={32: 1, 128: 1, "full": 3})
@@ -198,9 +256,9 @@ def test_run_item_protocol_routing(ladder_env, monkeypatch):
 
 def test_worklist_and_pending_skip_arms_without_encoder(ladder_env, caplog):
     wl = L.worklist()
-    assert len(L.ARMS) == 11 and L.ARMS[:8] == ("B", "T25", "T100", "R25a", "R25b", "R100", "D535", "chemeleon")
-    assert L.ARMS[8:] == ("rand", "B_s1", "T100_s1")
-    assert len(wl) == 2 * 11 * (3 * 10 + 2 * 5 + 3 * 3) and len({*wl}) == len(wl)
+    assert len(L.ARMS) == 13 and L.ARMS[:8] == ("B", "T25", "T100", "R25a", "R25b", "R100", "D535", "chemeleon")
+    assert L.ARMS[8:] == ("rand", "B_s1", "T100_s1", "T100_ames", "T100_ld50")
+    assert len(wl) == 2 * 13 * (3 * 10 + 2 * 5 + 3 * 3) and len({*wl}) == len(wl)
     assert {a for _, a, _, _ in wl} == set(L.ARMS) and wl[0][2] == "full"
     assert {n for _, _, n, s in wl if s >= 3} >= {16, 128}
     _make_arm("B")

@@ -29,8 +29,10 @@ log = logging.getLogger(__name__)
 
 TASKS = ("tdcommons/ames", "tdcommons/ld50-zhu")
 # The first 8 arms keep their order (shard keys depend on it); later arms are appended: `rand` = never-pretrained
-# encoder (scripts/p2_06_make_rand.py), `B_s1` / `T100_s1` = second pretraining seed of B / T100.
-ARMS = ("B", "T25", "T100", "R25a", "R25b", "R100", "D535", "chemeleon", "rand", "B_s1", "T100_s1")
+# encoder (scripts/p2_06_make_rand.py), `B_s1` / `T100_s1` = second pretraining seed of B / T100,
+# `T100_ames` / `T100_ld50` = per-task tailored top-100 sets (drift.phase2.sets).
+ARMS = ("B", "T25", "T100", "R25a", "R25b", "R100", "D535", "chemeleon", "rand", "B_s1", "T100_s1",
+        "T100_ames", "T100_ld50")
 NO_PRETRAIN_CHECKS = ("chemeleon", "rand")  # ready as soon as the encoder file exists (no patience/pool checks)
 SIZES = (16, 32, 64, 128, 256, 512, 1024, "full")
 FIXED_STEPS = 16
@@ -100,8 +102,17 @@ def load_subsample(task: str, n, seed: int, root: Path | None = None) -> dict:
     return json.loads(subsample_path(task, n, seed, root).read_text())
 
 
-def run_dir(task: str, arm: str, n, seed: int) -> Path:
-    return config.RUNS / "phase2" / "ladder" / slug(task) / arm / f"N{n}_s{seed}"
+def ladder_root(mode: str = "ft", steps: int = FIXED_STEPS) -> Path:
+    """runs/phase2/ladder (ft, 16 steps: the original layout); frozen -> ladder_frozen; steps != 16 -> ladder_steps<S>
+    (both -> ladder_frozen_steps<S>)."""
+    if mode not in ("ft", "frozen"):
+        raise ValueError(f"unknown mode {mode!r}")
+    name = "ladder" + ("_frozen" if mode == "frozen" else "") + ("" if steps == FIXED_STEPS else f"_steps{int(steps)}")
+    return config.RUNS / "phase2" / name
+
+
+def run_dir(task: str, arm: str, n, seed: int, mode: str = "ft", steps: int = FIXED_STEPS) -> Path:
+    return ladder_root(mode, steps) / slug(task) / arm / f"N{n}_s{seed}"
 
 
 def pretrain_dir(arm: str) -> Path:
@@ -181,11 +192,12 @@ def shard_items(items: list, i: int, n: int) -> list:
     return [it for k, it in enumerate(items) if ((k % A) * n_blocks + k // A) % n == i]
 
 
-def pending(items: list) -> list:
-    """Items not done whose arm encoder exists; items of arms without a finished encoder are logged and skipped."""
+def pending(items: list, mode: str = "ft", steps: int = FIXED_STEPS) -> list:
+    """Items not done (in the run dir of `mode` / `steps`) whose arm encoder exists; items of arms without a finished
+    encoder are logged and skipped."""
     out, missing = [], {}
     for it in items:
-        if (run_dir(*it) / "done.json").exists():
+        if (run_dir(*it, mode=mode, steps=steps) / "done.json").exists():
             continue
         if not arm_ready(it[1]):
             missing[it[1]] = missing.get(it[1], 0) + 1
@@ -202,13 +214,15 @@ def _task(name: str) -> TaskData:
 
 
 def run_item(task: str, arm: str, n, seed: int, gpu: int | None, task_data: TaskData | None = None,
-             subsample_root: Path | None = None) -> dict:
+             subsample_root: Path | None = None, mode: str = "ft", steps: int = FIXED_STEPS) -> dict:
     """Fine-tune `arm`'s encoder on subsample (task, n, seed). `gpu` is informational (the script restricts the
-    visible devices via CUDA_VISIBLE_DEVICES); gpu=None runs on CPU. Removes a half-written run dir first."""
+    visible devices via CUDA_VISIBLE_DEVICES); gpu=None runs on CPU. Removes a half-written run dir first.
+    mode "frozen" trains only the head (encoder weights asserted unchanged); `steps` is the fixed-step budget of the
+    N <= 64 protocol. Both change the run dir (see ladder_root) and are recorded in run.json (mode, fixed_steps)."""
     td = task_data if task_data is not None else _task(task)
     sub = load_subsample(task, n, seed, subsample_root)
     assert sub["sha1"] == _sha1(sub["idx"]) and sub["N"] == n and sub["seed"] == seed
-    d = run_dir(task, arm, n, seed)
+    d = run_dir(task, arm, n, seed, mode, steps)
     if d.exists():
         shutil.rmtree(d)
     kw = dict(accelerator="cpu" if gpu is None else "gpu", mp_path=arm_mp_path(arm), cache_graphs=True)
@@ -220,8 +234,8 @@ def run_item(task: str, arm: str, n, seed: int, gpu: int | None, task_data: Task
         regime = "custom"
         kw.update(train_idx=np.asarray(sub["idx"], dtype=int))
         if n <= 64:
-            kw.update(fixed_steps=FIXED_STEPS, batch_size=min(n, MAX_FIXED_BATCH), num_workers=0)
+            kw.update(fixed_steps=int(steps), batch_size=min(n, MAX_FIXED_BATCH), num_workers=0)
         else:
             kw.update(num_workers=2)
     extra = dict(arm=arm, N=n, subsample_seed=seed, subsample_sha1=sub["sha1"], ft_seed=ft_seed(n, seed))
-    return run_one(td, regime, "ft", ft_seed(n, seed), d, extra_info=extra, **kw)
+    return run_one(td, regime, mode, ft_seed(n, seed), d, extra_info=extra, **kw)
