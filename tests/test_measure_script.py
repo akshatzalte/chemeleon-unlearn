@@ -194,3 +194,60 @@ def test_small_task_measured_with_full_regime_only(env, monkeypatch):
     # a task with n128 runs missing but n_train > N_SMALL is still "not all done"
     monkeypatch.setattr(S, "load_task", lambda name: fake_task(N, "regression"))
     assert S.expected_runs(NAME) is None
+
+
+def test_combine_requires_markers(tmp_path, monkeypatch):
+    spec = importlib.util.spec_from_file_location("measure_script_c", config.ROOT / "scripts/03_measure.py")
+    S = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(S)
+    out, res = tmp_path / "drift", tmp_path / "res"
+    g = out / "_global"
+    g.mkdir(parents=True); res.mkdir()
+    monkeypatch.setattr(S, "OUT", out); monkeypatch.setattr(S, "GLOBAL", g); monkeypatch.setattr(S, "RESULTS", res)
+
+    def pq(path, tag):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame({"tag": [tag]}).to_parquet(path)
+
+    for f in ("drift_long", "families", "eta2", "posctrl", "drift_long_pc", "drift_long_ownalpha", "corr_clusters", "effdim"):
+        pq(g / f"{f}.parquet", f"g_{f}")
+    for m in ("done", "pca_done", "ownalpha_done"):
+        (g / f"{m}.json").write_text("{}")
+    # ok: everything; half: done.json but pc parquet written without pc_done; nodone: no done.json at all
+    for t in ("ok", "half", "nodone"):
+        for f in ("drift_long", "families", "eta2", "posctrl", "drift_long_pc", "drift_long_novel", "drift_long_ownalpha"):
+            pq(out / t / f"{f}.parquet", f"{t}_{f}")
+    for m in ("done", "pc_done", "novel_done", "ownalpha_done"):
+        (out / "ok" / f"{m}.json").write_text("{}")
+    for m in ("done", "novel_done"):
+        (out / "half" / f"{m}.json").write_text("{}")
+    S.combine()
+    d = pd.read_parquet(res / "drift_long.parquet")["tag"].tolist()
+    assert "ok_drift_long_pc" in d and "ok_drift_long_novel" in d and "ok_drift_long_ownalpha" in d
+    assert "half_drift_long" in d and "half_drift_long_novel" in d
+    assert "half_drift_long_pc" not in d and "half_drift_long_ownalpha" not in d
+    assert not any(x.startswith("nodone") for x in d)
+    assert "g_drift_long_pc" in d and "g_drift_long_ownalpha" in d
+    assert not any(x.startswith("nodone") for x in pd.read_parquet(res / "families.parquet")["tag"])
+    assert (res / "effdim.parquet").exists()
+
+
+def test_combine_logs_summary_and_global_markers(tmp_path, monkeypatch, capsys):
+    spec = importlib.util.spec_from_file_location("measure_script_c2", config.ROOT / "scripts/03_measure.py")
+    S = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(S)
+    out, res = tmp_path / "drift", tmp_path / "res"
+    g = out / "_global"
+    g.mkdir(parents=True); res.mkdir()
+    monkeypatch.setattr(S, "OUT", out); monkeypatch.setattr(S, "GLOBAL", g); monkeypatch.setattr(S, "RESULTS", res)
+    for f in ("drift_long", "families", "eta2", "posctrl", "corr_clusters", "drift_long_pc"):
+        pd.DataFrame({"tag": [f"g_{f}"]}).to_parquet(g / f"{f}.parquet")
+    (g / "done.json").write_text("{}")   # no pca_done.json -> global pc parquet excluded
+    (out / "t1").mkdir()
+    for f in ("drift_long", "families", "eta2", "posctrl"):
+        pd.DataFrame({"tag": [f"t_{f}"]}).to_parquet(out / "t1" / f"{f}.parquet")
+    (out / "t1" / "done.json").write_text("{}")
+    S.combine()
+    printed = capsys.readouterr().out
+    assert "combined 1 tasks; missing pc: ['t1'], novel: ['t1'], ownalpha: ['t1']" in printed
+    assert "g_drift_long_pc" not in pd.read_parquet(res / "drift_long.parquet")["tag"].tolist()

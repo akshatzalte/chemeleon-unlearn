@@ -445,7 +445,7 @@ def measure_task(name, pub: Pubchem, mods, cluster_map, device):
                 L.append(pd.DataFrame({"task": name, "regime": regime, "ckpt": ckpt, "probe_set": "",
                                        "encoder": f"seed{seed}", "measure": "wchange",
                                        "descriptor": list(wc), "value": list(wc.values())}))
-                loader = lambda d=d: load_mp(d / f"{ckpt}_mp.pt")
+                loader = lambda d=d, ckpt=ckpt: load_mp(d / f"{ckpt}_mp.pt")
                 Zt[f"seed{seed}"] = get_emb(s, eid, loader, smi, device)
                 Zq[f"seed{seed}"] = pub.embed_enc(eid, loader)
             # PubChem view
@@ -477,22 +477,55 @@ def measure_task(name, pub: Pubchem, mods, cluster_map, device):
     return True
 
 
+SECONDARY = {"drift_long_pc": "pc_done.json", "drift_long_novel": "novel_done.json", "drift_long_ownalpha": "ownalpha_done.json"}
+GLOBAL_MARKER = {"drift_long": "done.json", "families": "done.json", "eta2": "done.json", "posctrl": "done.json",
+                 "drift_long_pc": "pca_done.json", "drift_long_ownalpha": "ownalpha_done.json"}
+
+
 def combine():
+    """Concatenate per-task outputs into results/*.parquet. A task is included only if done.json exists and, for each
+    secondary file it has (pc / novel / ownalpha), its marker exists too (guards against half-written parquets);
+    _global parquets likewise need their marker. Every skipped task/file is logged."""
+    missing = {k: [] for k in ("pc", "novel", "ownalpha")}
+    tasks = sorted(d.name for d in OUT.iterdir() if d.is_dir() and d.name != "_global")
+    done = [t for t in tasks if (OUT / t / "done.json").exists()]
+    for t in tasks:
+        if t not in done:
+            log(f"combine: {t}: no done.json, skipped")
+    for sec, marker in SECONDARY.items():
+        key = sec.replace("drift_long_", "")
+        for t in done:
+            if not (OUT / t / marker).exists():
+                missing[key].append(t)
+                log(f"combine: {t}: missing {marker} -> {sec} excluded")
     for f in ("drift_long", "families", "eta2", "posctrl"):
-        parts = sorted(OUT.glob(f"*/{f}.parquet"))
-        parts = [p for p in parts if p.parent.name == "_global" or (p.parent / "done.json").exists()]
-        if f == "drift_long":
-            parts += sorted(OUT.glob("*/drift_long_ownalpha.parquet")) + sorted(OUT.glob("*/drift_long_pc.parquet")) + sorted(OUT.glob("*/drift_long_novel.parquet"))
+        parts = []
+        for name in [f] + ([k for k in SECONDARY] if f == "drift_long" else []):
+            gp = GLOBAL / f"{name}.parquet"
+            if gp.exists():
+                if (GLOBAL / GLOBAL_MARKER[name]).exists():
+                    parts.append(gp)
+                else:
+                    log(f"combine: _global: missing {GLOBAL_MARKER[name]} -> {gp.name} excluded")
+            for t in done:
+                p = OUT / t / f"{name}.parquet"
+                if name != f and not (OUT / t / SECONDARY[name]).exists():
+                    continue
+                if p.exists():
+                    parts.append(p)
         df = pd.concat([pd.read_parquet(p) for p in parts], ignore_index=True)
         df.to_parquet(RESULTS / f"{f}.parquet")
         log(f"combined {f}: {len(df)} rows from {len(parts)} parts")
     pd.read_parquet(GLOBAL / "corr_clusters.parquet").to_parquet(RESULTS / "corr_clusters.parquet")
-    for f in ("effdim.parquet",):
-        if (GLOBAL / f).exists():
-            pd.read_parquet(GLOBAL / f).to_parquet(RESULTS / f)
-    if (GLOBAL / "pca.npz").exists():
-        import shutil
-        shutil.copy(GLOBAL / "pca.npz", RESULTS / "pca.npz")
+    if (GLOBAL / "pca_done.json").exists():
+        if (GLOBAL / "effdim.parquet").exists():
+            pd.read_parquet(GLOBAL / "effdim.parquet").to_parquet(RESULTS / "effdim.parquet")
+        if (GLOBAL / "pca.npz").exists():
+            import shutil
+            shutil.copy(GLOBAL / "pca.npz", RESULTS / "pca.npz")
+    else:
+        log("combine: _global: missing pca_done.json -> effdim/pca excluded")
+    log(f"combined {len(done)} tasks; missing pc: {missing['pc']}, novel: {missing['novel']}, ownalpha: {missing['ownalpha']}")
 
 
 def main():
