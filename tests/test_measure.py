@@ -180,3 +180,53 @@ def test_own_alpha_matches_fixed_alpha_when_alpha_agrees(synth):
     assert set(own2["alphas"]) == set(SEEDS) and own2["dropped"][0]
     df = alpha_rows(dict(task="t", regime="full", ckpt="es", probe_set="pubchem_ownalpha"), own2["alphas"], 10.0)
     assert set(df.encoder) == {"pre", *SEEDS} and set(df.measure) == {"alpha"}
+
+
+def test_pca_duplicated_descriptors_give_one_pc():
+    from drift.measure import fit_pca, pc_scores
+    r = np.random.default_rng(0)
+    x = r.normal(size=(200, 1))
+    Y = np.hstack([x, x, x, x])
+    pca = fit_pca(Y)
+    assert pca["loadings"].shape == (4, 1) and abs(pca["evr"][0] - 1) < 1e-9
+    s = pc_scores(Y, np.zeros(4), np.ones(4), pca)
+    assert s.shape == (200, 1) and abs(s.std() - np.sqrt(4) * x.std()) < 1e-6
+
+
+def test_pca_keeps_99pct_and_nan_to_zero():
+    from drift.measure import fit_pca
+    r = np.random.default_rng(1)
+    Y = r.normal(size=(300, 3)) @ r.normal(size=(3, 10)) + 1e-3 * r.normal(size=(300, 10))
+    Y[0, 0] = np.nan
+    p = fit_pca(Y)
+    assert p["loadings"].shape[1] == 3 and p["evr"].sum() >= 0.99
+
+
+def test_effdim_identical_columns_is_one():
+    import pandas as pd
+    from drift.measure import effdim_table
+    r = np.random.default_rng(2)
+    x = r.normal(size=(100, 1))
+    Y = np.hstack([x, x, x, r.normal(size=(100, 2))])
+    names = ["a", "b", "c", "d", "e"]
+    mods = pd.Series(["M1", "M1", "M1", "M2", "M2"], index=names)
+    t = effdim_table(Y, names, mods).set_index("family")
+    assert t.loc["M1", ["n90", "n95", "n99"]].tolist() == [1, 1, 1]
+    assert abs(t.loc["M1", "participation_ratio"] - 1) < 1e-9 and t.loc["M1", "n_descriptors"] == 3
+    assert t.loc["M2", "n99"] == 2 and t.loc["ALL", "n_descriptors"] == 5
+
+
+def test_evr_weighted_delta_hand_computed(synth):
+    from drift.measure import evr_weighted, pc_long_rows
+    Z, lost, T, n = synth
+    out = measure_probe_set(Z, {s: lost for s in SEEDS}, T, np.arange(n), mode="crossfit",
+                            folds=make_folds(n), alpha=1.0, n_boot=20)
+    evr = np.array([0.5, 0.2, 0.1, 0.1, 0.05, 0.05])
+    assert abs(evr_weighted(out["delta_mean"], evr) - float((evr * out["delta_mean"]).sum())) < 1e-12
+    assert evr_weighted([-1.0, np.nan, -0.5], [0.5, 0.3, 0.2]) == -0.6
+    base = dict(task="t", regime="full", ckpt="es", probe_set="task_all_pc")
+    df = pc_long_rows(out, [f"PC{i+1}" for i in range(6)], base, "ft", evr)
+    v = df[(df.measure == "delta_r2_evrw") & (df.encoder == "ft")]["value"]
+    assert len(v) == 1 and abs(v.iloc[0] - float((evr * out["delta_mean"]).sum())) < 1e-12
+    assert not df.measure.isin(["cka", "cka_seedpair"]).any()
+    assert (df[df.measure == "delta_r2_evrw"]["descriptor"] == "").all()

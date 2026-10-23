@@ -1,6 +1,6 @@
 """Drift measurement (resumable, per task).
 
-    03_measure.py [--only SLUG ...] [--device cuda] [--no-ownalpha] [--combine]
+    03_measure.py [--only SLUG ...] [--device cuda] [--no-ownalpha] [--no-pc] [--combine]
 
 Per task writes results/drift/<slug>/{drift_long,families,eta2,posctrl}.parquet then
 done.json (last). PubChem rand anchor + correlation clusters live in results/drift/_global/.
@@ -19,10 +19,11 @@ import torch
 
 from drift import config
 from drift.config import BENCHMARKS, DATA, RESULTS, RUNS, SEEDS, slug
-from drift.descriptors import descriptor_modules, prepare_targets
+from drift.descriptors import Targets, descriptor_modules, prepare_targets
 from drift.encoders import embed, load_mp, random_mp
-from drift.measure import (alpha_rows, clean_rows, compare_to_pre, family_labels, measure_own_alpha, family_outputs, long_rows,
+from drift.measure import (effdim_table, fit_pca, pc_long_rows, pc_scores, alpha_rows, clean_rows, compare_to_pre, family_labels, measure_own_alpha, family_outputs, long_rows,
                            measure_probe_set, posctrl_rows, predict_probe, weight_change)
+from drift.measure import LONG_COLS as LONG_COLS_
 from drift.probe import choose_alpha, make_folds
 from drift.stats import correlation_clusters, positive_control
 from drift.tasks import load_task
@@ -111,6 +112,113 @@ def ensure_global(pub: Pubchem, mods: pd.Series):
     r2 = res["r2_pre"]
     log(f"global done: pre PubChem R2 median={np.nanmedian(r2):.3f} "
         f"rand median={np.nanmedian(np.concatenate([v for v in res['r2'].values()])):.3f} alpha={pub.alpha}")
+
+
+def pc_names(k):
+    return [f"PC{i + 1}" for i in range(k)]
+
+
+def load_pca():
+    z = np.load(GLOBAL / "pca.npz", allow_pickle=True)
+    return {"loadings": z["loadings"], "evr": z["evr"], "mean": z["mean"], "mu": z["mu"], "sd": z["sd"],
+            "names": [str(n) for n in z["names"]]}
+
+
+def pubchem_pc(pub, pca):
+    """(Ypc (n,k), Yhat_pre_pc) for PubChem; cached on the Pubchem object."""
+    if getattr(pub, "_pc", None) is None:
+        Ypc = pc_scores(pub.D[pca["names"]].to_numpy(dtype=np.float64, na_value=np.nan), pca["mu"], pca["sd"], pca)
+        Yh = predict_probe(pub.Z_pre, Ypc, "split", alpha=pub.alpha, fit_rows=FIT)
+        pub._pc = (Ypc, Yh)
+    return pub._pc
+
+
+def ensure_global_pc(pub: Pubchem, mods):
+    """PCA basis, effective dimensionality, PubChem rand anchor + evr rows (once)."""
+    if (GLOBAL / "pca_done.json").exists():
+        return
+    log("global: PCA + effdim + PubChem PC rand anchor")
+    names = pub.targets.names
+    Yf = pub.targets.Y[FIT].astype(np.float64)
+    pca = fit_pca(Yf)
+    X = pub.D[names].to_numpy(dtype=np.float64, na_value=np.nan)[FIT]
+    mu, sd = np.nanmean(X, 0), np.nanstd(X, 0)
+    np.savez(GLOBAL / "pca.npz", loadings=pca["loadings"], evr=pca["evr"], mean=pca["mean"], mu=mu, sd=sd,
+             names=np.array(names))
+    ed = effdim_table(Yf, names, mods)
+    ed.to_parquet(GLOBAL / "effdim.parquet")
+    pca.update(mu=mu, sd=sd, names=list(names))
+    k = pca["loadings"].shape[1]
+    Ypc, Yh = pubchem_pc(pub, pca)
+    T = Targets(Ypc.astype(np.float32), pc_names(k), [])
+    Zr = {f"rand{i}": pub.embed_enc(f"rand{i}", lambda i=i: random_mp(i)) for i in range(3)}
+    res = measure_probe_set(pub.Z_pre, Zr, T, {e: EVAL for e in Zr}, "split", alpha=pub.alpha,
+                            fit_rows=FIT, Yhat_pre=Yh)
+    base = dict(task="", regime="", ckpt="", probe_set="pubchem_pc")
+    evr = pd.DataFrame({**{c: [v] * k for c, v in base.items()}, "encoder": "pca", "measure": "evr",
+                        "descriptor": pc_names(k), "value": pca["evr"]})[LONG_COLS_]
+    pd.concat([pc_long_rows(res, pc_names(k), base, "rand", pca["evr"]), evr], ignore_index=True
+              ).to_parquet(GLOBAL / "drift_long_pc.parquet")
+    (GLOBAL / "pca_done.json").write_text(json.dumps({"n_components": k, "n_descriptors": len(names),
+                                                      "n99_overall": int(ed.iloc[0]["n99"])}))
+    log(f"global PCA: {k} components for {len(names)} descriptors; effdim ALL: {ed.iloc[0].to_dict()}")
+
+
+def pc_task(name, pub: Pubchem, pca):
+    """Decorrelated (PC-target) views for one finished task; marker pc_done.json."""
+    d = OUT / slug(name)
+    if (d / "pc_done.json").exists() or not (d / "done.json").exists():
+        return
+    t0 = time.time()
+    s = slug(name)
+    runs = expected_runs(name)
+    meta = json.loads((d / "done.json").read_text())
+    task = load_task(name)
+    n = len(task.train_smiles)
+    smi = list(task.train_smiles)
+    Draw = pd.read_parquet(DATA / f"descriptors/{s}.parquet")
+    Ypc = pc_scores(Draw[pca["names"]].to_numpy(dtype=np.float64, na_value=np.nan), pca["mu"], pca["sd"], pca)
+    k = Ypc.shape[1]
+    pcn, evr = pc_names(k), pca["evr"]
+    Ypub, Yhpub = pubchem_pc(pub, pca)
+    Tpub = Targets(Ypub.astype(np.float32), pcn, [])
+    folds = make_folds(n, config.N_FOLDS, 0)
+    kw = dict(mode="crossfit", folds=folds, alpha=meta["alpha_task"])
+    Zp = get_emb(s, "pre", lambda: load_mp(config.CHEMELEON_MP), smi, device_of(pub))
+    Yp = predict_probe(Zp, Ypc, **kw)
+    allrows = np.arange(n)
+    out = []
+    Zr = {f"rand{i}": get_emb(s, f"rand{i}", lambda i=i: random_mp(i), smi, device_of(pub)) for i in range(3)}
+    res = compare_to_pre(Ypc, Yp, {e: predict_probe(Z, Ypc, **kw) for e, Z in Zr.items()}, Zp, Zr,
+                         {e: allrows for e in Zr})
+    out.append(pc_long_rows(res, pcn, dict(task=name, regime="", ckpt="", probe_set="task_all_pc"), "rand", evr))
+    for regime in config.REGIMES:
+        clean = {seed: clean_rows(runs[(regime, seed)], n) for seed in SEEDS}
+        for ckpt in CKPTS:
+            Zt, Zq = {}, {}
+            for seed in SEEDS:
+                dd = runs[(regime, seed)]["dir"]
+                eid = f"{s}__{regime}__s{seed}__{ckpt}"
+                loader = lambda dd=dd, ckpt=ckpt: load_mp(dd / f"{ckpt}_mp.pt")
+                Zt[f"seed{seed}"] = get_emb(s, eid, loader, smi, device_of(pub))
+                Zq[f"seed{seed}"] = pub.embed_enc(eid, loader)
+            b = dict(task=name, regime=regime, ckpt=ckpt)
+            res = measure_probe_set(pub.Z_pre, Zq, Tpub, {e: EVAL for e in Zq}, "split", alpha=pub.alpha,
+                                    fit_rows=FIT, Yhat_pre=Yhpub)
+            out.append(pc_long_rows(res, pcn, dict(b, probe_set="pubchem_pc"), "ft", evr))
+            preds = {e: predict_probe(Z, Ypc, **kw) for e, Z in Zt.items()}
+            for view, rows in (("task_all_pc", {e: allrows for e in Zt}),
+                               ("task_clean_pc", {f"seed{sd}": clean[sd] for sd in SEEDS})):
+                res = compare_to_pre(Ypc, Yp, preds, Zp, Zt, rows)
+                out.append(pc_long_rows(res, pcn, dict(b, probe_set=view), "ft", evr))
+            log(f"  {name} PC {regime}/{ckpt} done ({time.time() - t0:.0f}s)")
+    pd.concat(out, ignore_index=True).to_parquet(d / "drift_long_pc.parquet")
+    (d / "pc_done.json").write_text(json.dumps({"seconds": time.time() - t0, "n_components": k}))
+    log(f"{name}: PC views done in {time.time() - t0:.0f}s")
+
+
+def device_of(pub):
+    return pub.device
 
 
 def _cached_alphas(path):
@@ -270,11 +378,17 @@ def combine():
         parts = sorted(OUT.glob(f"*/{f}.parquet"))
         parts = [p for p in parts if p.parent.name == "_global" or (p.parent / "done.json").exists()]
         if f == "drift_long":
-            parts += sorted(OUT.glob("*/drift_long_ownalpha.parquet"))
+            parts += sorted(OUT.glob("*/drift_long_ownalpha.parquet")) + sorted(OUT.glob("*/drift_long_pc.parquet"))
         df = pd.concat([pd.read_parquet(p) for p in parts], ignore_index=True)
         df.to_parquet(RESULTS / f"{f}.parquet")
         log(f"combined {f}: {len(df)} rows from {len(parts)} parts")
     pd.read_parquet(GLOBAL / "corr_clusters.parquet").to_parquet(RESULTS / "corr_clusters.parquet")
+    for f in ("effdim.parquet",):
+        if (GLOBAL / f).exists():
+            pd.read_parquet(GLOBAL / f).to_parquet(RESULTS / f)
+    if (GLOBAL / "pca.npz").exists():
+        import shutil
+        shutil.copy(GLOBAL / "pca.npz", RESULTS / "pca.npz")
 
 
 def main():
@@ -283,6 +397,8 @@ def main():
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     ap.add_argument("--ownalpha", action=argparse.BooleanOptionalAction, default=True,
                     help="secondary per-encoder-alpha PubChem measurement (--no-ownalpha to skip)")
+    ap.add_argument("--pc", action=argparse.BooleanOptionalAction, default=True,
+                    help="decorrelated PC-target views + effective dimensionality (--no-pc to skip)")
     ap.add_argument("--combine", action="store_true")
     a = ap.parse_args()
     if a.combine:
@@ -292,6 +408,10 @@ def main():
     ensure_global(pub, mods)
     if a.ownalpha:
         ensure_global_ownalpha(pub)
+    pca = None
+    if a.pc:
+        ensure_global_pc(pub, mods)
+        pca = load_pca()
     cl = pd.read_parquet(GLOBAL / "corr_clusters.parquet")
     cluster_map = dict(zip(cl["descriptor"], cl["cluster"]))
     for name in BENCHMARKS:
@@ -303,6 +423,8 @@ def main():
             measure_task(name, pub, mods, cluster_map, a.device)
         if a.ownalpha:
             ownalpha_task(name, pub)
+        if a.pc:
+            pc_task(name, pub, pca)
 
 
 if __name__ == "__main__":

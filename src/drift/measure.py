@@ -221,3 +221,67 @@ def measure_own_alpha(Z_pre, Z_by_encoder: dict, targets, eval_rows, fit_rows, a
 def alpha_rows(base: dict, alphas: dict, alpha_pre: float) -> pd.DataFrame:
     return pd.concat([_block(base, e, "alpha", "", a) for e, a in {"pre": alpha_pre, **alphas}.items()],
                      ignore_index=True)[LONG_COLS]
+
+
+# ------------------------------------------------------------------- PCA / eff. dim.
+PCA_VAR = 0.99
+
+
+def fit_pca(Y_fit, var: float = PCA_VAR) -> dict:
+    """PCA (centered, unscaled) of standardized descriptor targets; NaN -> 0 first.
+    Keeps components up to `var` cumulative explained variance. Returns loadings (d,k),
+    evr (k,) (fraction of TOTAL variance), mean (d,)."""
+    X = np.nan_to_num(np.asarray(Y_fit, dtype=np.float64))
+    mean = X.mean(0)
+    _, s, Vt = np.linalg.svd(X - mean, full_matrices=False)
+    lam = s ** 2
+    evr = lam / lam.sum()
+    k = int(np.searchsorted(np.cumsum(evr), var) + 1)
+    return {"loadings": Vt[:k].T, "evr": evr[:k], "mean": mean}
+
+
+def pc_scores(D_raw, mu, sd, pca: dict) -> np.ndarray:
+    """Project raw descriptors (n,d; columns in PCA name order) onto the PCA basis, using the
+    PubChem fit-split mu/sd (NOT the target set's), clip +-WINSOR, NaN -> 0."""
+    Z = np.clip((np.asarray(D_raw, dtype=np.float64) - mu) / sd, -config.WINSOR, config.WINSOR)
+    return (np.nan_to_num(Z) - pca["mean"]) @ pca["loadings"]
+
+
+def evr_weighted(delta, evr) -> float:
+    """sum_k evr_k * delta_k over finite deltas."""
+    delta = np.asarray(delta, dtype=np.float64)
+    ok = np.isfinite(delta)
+    return float(np.sum(np.asarray(evr)[ok] * delta[ok]))
+
+
+def _eff_dim(Y):
+    X = np.nan_to_num(np.asarray(Y, dtype=np.float64))
+    lam = np.linalg.svd(X - X.mean(0), compute_uv=False) ** 2
+    if lam.sum() <= 0:
+        return dict(n90=0, n95=0, n99=0, participation_ratio=float("nan"))
+    c = np.cumsum(lam) / lam.sum()
+    n = {f"n{p}": int(np.searchsorted(c, p / 100 - 1e-12) + 1) for p in (90, 95, 99)}
+    return {**n, "participation_ratio": float(lam.sum() ** 2 / (lam ** 2).sum())}
+
+
+def effdim_table(Y_fit, names, modules: pd.Series) -> pd.DataFrame:
+    """Effective dimensionality overall ('ALL') and within each Mordred module."""
+    Y_fit = np.asarray(Y_fit)
+    mod = np.array([str(modules[n]) for n in names])
+    rows = [dict(family="ALL", n_descriptors=len(names), **_eff_dim(Y_fit))]
+    for m in sorted(set(mod)):
+        sel = mod == m
+        rows.append(dict(family=m, n_descriptors=int(sel.sum()), **_eff_dim(Y_fit[:, sel])))
+    return pd.DataFrame(rows)
+
+
+def pc_long_rows(res: dict, pc_names, base: dict, agg: str, evr) -> pd.DataFrame:
+    """long_rows for PC targets (without the duplicate CKA measures) plus the
+    variance-weighted summary `delta_r2_evrw` (per seed and aggregate)."""
+    df = long_rows(res, pc_names, base, agg)
+    df = df[~df["measure"].isin(["cka", "cka_seedpair"])]
+    blocks = [df]
+    for i, e in enumerate(res["encoders"]):
+        blocks.append(_block(base, e, "delta_r2_evrw", "", evr_weighted(res["delta_per_seed"][i], evr)))
+    blocks.append(_block(base, agg, "delta_r2_evrw", "", evr_weighted(res["delta_mean"], evr)))
+    return pd.concat(blocks, ignore_index=True)[LONG_COLS]
