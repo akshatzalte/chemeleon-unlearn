@@ -26,6 +26,27 @@ def linear_cka(X: np.ndarray, Y: np.ndarray) -> float:
     return float(num / den)
 
 
+def _hsic_u(K: np.ndarray, L: np.ndarray) -> float:
+    """Unbiased HSIC estimator (Song et al. 2012) for Gram matrices with zeroed diagonals."""
+    n = K.shape[0]
+    k1, l1 = K.sum(1), L.sum(1)
+    t = np.sum(K * L) + k1.sum() * l1.sum() / ((n - 1) * (n - 2)) - 2.0 / (n - 2) * (k1 @ l1)
+    return float(t / (n * (n - 3)))
+
+
+def debiased_linear_cka(X: np.ndarray, Y: np.ndarray) -> float:
+    """Debiased linear CKA (Kornblith et al. 2019 / Nguyen et al. 2021): CKA from the unbiased
+    HSIC estimator on linear Gram matrices with zeroed diagonals (needs n > 3; float64).
+    Unlike linear_cka it is ~0 for independent features even when n << dimension."""
+    X = np.asarray(X, dtype=np.float64)
+    Y = np.asarray(Y, dtype=np.float64)
+    K = X @ X.T
+    L = Y @ Y.T
+    np.fill_diagonal(K, 0.0)
+    np.fill_diagonal(L, 0.0)
+    return float(_hsic_u(K, L) / np.sqrt(_hsic_u(K, K) * _hsic_u(L, L)))
+
+
 # ------------------------------------------------------------------------- folds
 def make_folds(n: int, k: int = 5, seed: int = 0) -> np.ndarray:
     """Row-based fold ids in [0, k), balanced sizes (differ by <=1), deterministic."""

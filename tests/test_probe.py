@@ -1,7 +1,7 @@
 import numpy as np
 from sklearn.linear_model import Ridge
 
-from drift.probe import (choose_alpha, crossfit_predict, linear_cka, make_folds,
+from drift.probe import (choose_alpha, crossfit_predict, debiased_linear_cka, linear_cka, make_folds,
                          paired_bootstrap_delta, r2_cols, ridge_fit_predict)
 
 rng = np.random.default_rng(0)
@@ -186,3 +186,17 @@ def test_floor_and_clip_are_noops_on_well_scaled_data():
     mu, sd = _standardize(Z)
     np.testing.assert_allclose(sd, Z.std(0))
     np.testing.assert_allclose(_scale(Z, mu, sd), (Z - mu) / Z.std(0))
+
+
+def test_debiased_cka_properties():
+    X = rng.normal(size=(120, 30)); Q, _ = np.linalg.qr(rng.normal(size=(30, 30)))
+    assert abs(debiased_linear_cka(X, X) - 1) < 1e-9
+    assert abs(debiased_linear_cka(X, 3 * X @ Q) - debiased_linear_cka(X, X)) < 1e-9
+    Y = X @ rng.normal(size=(30, 20)) + rng.normal(size=(120, 20))
+    assert abs(debiased_linear_cka(X, Y) - debiased_linear_cka(2.5 * X @ Q, Y)) < 1e-9
+
+
+def test_debiased_cka_unbiased_for_independent_high_dim():
+    X = rng.normal(size=(250, 2048)); Y = rng.normal(size=(250, 2048))
+    assert linear_cka(X, Y) > 0.5          # biased upward when n << d
+    assert abs(debiased_linear_cka(X, Y)) < 0.1
