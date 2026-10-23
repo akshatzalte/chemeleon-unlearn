@@ -34,6 +34,12 @@ training data shrinks?
   3-molecule validation set.
 - D4. Ames/LD50 Polaris **test** molecules are excluded from the pretraining pool; train
   molecules may remain (consistent with the phase-1 fairness ruling).
+- D5. All new arms use the **DEFAULT (V2 multi-hot) featurizer and MeanAggregation**, i.e.
+  public CheMeleon's architecture, not the how-to-train repo's defaults (RIGR +
+  NormAggregation). Reason: the phase-1 fine-tuning runner and the public-CheMeleon
+  reference line both assume V2 + mean pooling; a different featurizer/pooling would make
+  the reference incomparable and require a second fine-tuning path.
+- D6. E(N) for N ≤ 64 = **6 epochs** (phase-1 n128 `es_epoch`: median 6, IQR 3–10, n=78).
 
 ## 2. Goals, non-goals, anti-goals
 
@@ -86,9 +92,12 @@ task at each k.
 
 ## 4. Pretraining (one pipeline, five arms)
 
-- **Code:** `how-to-train-your-chemeleon` (`external/how-to-train-your-chemeleon`),
-  chemprop ≥ 2.3 with cuik-molmaker accelerated featurization, **no graph caching** (user
-  rule), in a separate conda env from phase 1.
+- **Code:** `how-to-train-your-chemeleon` (`external/how-to-train-your-chemeleon`) as the
+  base, chemprop ≥ 2.3 in a separate conda env from phase 1. Featurization in the pretraining
+  dataset must use chemprop 2.3's `CuikmolmakerMolGraphFeaturizer` (batch of SMILES →
+  `BatchCuikMolGraph`) instead of the repo's per-molecule `SimpleMoleculeMolGraphFeaturizer`
+  loop, with **no graph caching** (user rule). Featurizer mode V2 / mean aggregation per D5
+  (`d_v=72, d_e=14`, same as `chemeleon_mp.pt`).
 - **Molecule pool:** a fixed random subset of `cleaned_pubchem_1MM.smiles` of size
   **P = 200k** (fallback 100k if the compute gate fails), seed fixed, with Ames and LD50
   Polaris test molecules removed by non-isomeric canonical SMILES match. Same pool, same
@@ -119,11 +128,11 @@ task at each k.
   - N ≥ 128: paper protocol (80/20 train/val, max 50 epochs, patience-5 early stopping,
     es checkpoint).
   - N ≤ 64 (D3): no validation split; train on all N for a fixed number of epochs
-    E(N) set from phase 1's n128 `es_epoch` distribution (median es_epoch at n128, rounded;
-    the builder reads it from `runs/*/n128/ft/*/run.json`). Record E(N).
+    E = 6 (D6; chemprop's default 2 warm-up epochs then one-cycle decay over the remaining
+    4). Record it. The "es" checkpoint is the final weights.
   - Head: paper head (hidden 256); regression targets standardized on the subsample.
-- **Scoring:** `scripts/05_score.py` protocol (benchmark main metric: AUROC for Ames, MAE
-  for LD50 — confirm from `results/scores.parquet` `metric` column).
+- **Scoring:** `scripts/05_score.py` protocol; benchmark main metrics are `roc_auc`
+  (Ames, higher better) and `mean_absolute_error` (LD50, lower better) — sign-normalize.
 
 ## 6. Analysis
 
@@ -174,5 +183,5 @@ discards needed information.
   seed, descriptor computation parallelism, file layout under `data/phase2/` and
   `runs/phase2/`.
 - Graph-caching mechanism for fine-tuning and job packing per GPU.
-- Exact E(N) derivation, subsample seeding scheme (record all indices).
+- Subsample seeding scheme (record all indices).
 - Plot styling (use the `dataviz` skill).
