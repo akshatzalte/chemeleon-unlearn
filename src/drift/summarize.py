@@ -12,7 +12,10 @@ import pandas as pd
 KEYS = ["task", "regime", "ckpt", "probe_set"]
 PRIMARY_VIEWS = ("task_clean", "pubchem")
 PRIMARY_CELL = ("full", "es")
-CORR_DEFS = ("corr", "cluster")  # name of the correlation-family definition in eta2/families
+CORR_DEFS = ("corr", "cluster")
+ETA2_STRICT_RATIO = 1.5
+PC_PLOT_MIN_FRAC = 0.8
+VARIANTS = ("branch_cka_debiased", "branch_eta2_strict", "branch_no_eta2")  # name of the correlation-family definition in eta2/families
 CKA_LITTLE = 0.95
 DROP_FRAC_LITTLE = 0.05
 P_ALPHA = 0.05
@@ -21,22 +24,37 @@ BRANCHES = ("little_drift", "descriptor_specific", "uniform")
 
 
 # ---------------------------------------------------------------- pure rules
-def classify_branch(median_cka, drop_frac, p_module, p_corr, gap, gap_sd):
+def classify_branch(median_cka, drop_frac, p_module, p_corr, gap, gap_sd, ratio_module=np.nan, ratio_corr=np.nan,
+                    min_ratio=None, use_eta2=True):
     """Pre-registered per-task branch. Returns (branch, gap_status).
     little_drift: median CKA >= 0.95 and dropped/eligible <= 5%.
     descriptor_specific: not little_drift, eta2 p < 0.05 for both family defs, and the sign-normalised
     ft - frozen gap favours ft by more than 1 seed-SD (gap_status 'unknown_gap' if the gap is unavailable:
     then only the first two conditions are used).
-    uniform: otherwise. A missing p-value counts as not significant."""
+    uniform: otherwise. A missing p-value counts as not significant.
+    Sensitivity variants (the defaults reproduce the pre-registered rule): `min_ratio` additionally requires
+    eta2/null_q95 >= min_ratio for BOTH family defs (missing ratio fails); `use_eta2=False` drops the eta2 condition."""
     if median_cka >= CKA_LITTLE and drop_frac <= DROP_FRAC_LITTLE:
         return "little_drift", "ok"
-    sig = bool(p_module < P_ALPHA and p_corr < P_ALPHA)
+    if use_eta2:
+        sig = bool(p_module < P_ALPHA and p_corr < P_ALPHA)
+        if sig and min_ratio is not None:
+            sig = bool(ratio_module >= min_ratio and ratio_corr >= min_ratio)
+    else:
+        sig = True
     if not (np.isfinite(gap) and np.isfinite(gap_sd)):
         return ("descriptor_specific" if sig else "uniform"), "unknown_gap"
     return ("descriptor_specific" if sig and gap > gap_sd else "uniform"), "ok"
 
 
-def agree(a: str, b: str) -> str:
+def _missing(x) -> bool:
+    return x is None or (isinstance(x, float) and np.isnan(x)) or x is pd.NA
+
+
+def agree(a, b) -> str:
+    """Agreed branch of two views; `missing` if either view has no branch, `split` if they differ."""
+    if _missing(a) or _missing(b):
+        return "missing"
     return a if a == b else "split"
 
 
@@ -125,7 +143,37 @@ def _common_medians(el: pd.DataFrame, long: pd.DataFrame) -> pd.DataFrame:
                          "drift_n_common": g.size()}).reset_index()
 
 
-def per_task_summary(long, families, eta2, posctrl, scores, n_train: dict, es_epochs: dict) -> pd.DataFrame:
+def _branches(pt: pd.DataFrame, cka_col: str, **kw):
+    """(branch list, gap_status list) per row of pt; None where the CKA or a p-value is missing."""
+    res = [classify_branch(r.cka, r.drop_frac, r.eta2_p_module, r.eta2_p_corr, r.gap, r.gap_sd,
+                           ratio_module=r.eta2_ratio_module, ratio_corr=r.eta2_ratio_corr, **kw)
+           if np.isfinite(r.cka) and pd.notna(r.eta2_p_module) and pd.notna(r.eta2_p_corr) else (None, None)
+           for r in pt.assign(cka=pt[cka_col]).itertuples()]
+    return [b for b, _ in res], [s for _, s in res]
+
+
+def _add_cka_debiased(pt: pd.DataFrame, cka: pd.DataFrame | None) -> pd.DataFrame:
+    """Add cka_debiased_median (ft seeds vs pre, median), rand_cka_debiased_same_rows (random encoders on the SAME
+    rows as the view; task_clean: same regime, all seeds' clean rows) and n_cka_rows from the F1 table."""
+    for c in ("cka_debiased_median", "rand_cka_debiased_same_rows", "n_cka_rows"):
+        pt[c] = np.nan
+    if cka is None or cka.empty:
+        return pt
+    ft = cka[cka["encoder"].str.startswith("seed")]
+    g = ft.groupby(["task", "regime", "ckpt", "rows"]).agg(
+        cka_debiased_median=("cka_debiased", "median"), n_cka_rows=("n", "mean")).reset_index().rename(columns={"rows": "probe_set"})
+    rd = cka[cka["encoder"].str.startswith("rand")]
+    r_fixed = rd[rd["rows"] != "task_clean"].groupby(["task", "rows"])["cka_debiased"].mean().rename("r_fixed").reset_index()
+    r_clean = rd[rd["rows"] == "task_clean"].groupby(["task", "regime", "rows"])["cka_debiased"].mean().rename("r_clean").reset_index()
+    out = pt.drop(columns=["cka_debiased_median", "rand_cka_debiased_same_rows", "n_cka_rows"]).merge(
+        g, on=["task", "regime", "ckpt", "probe_set"], how="left")
+    out = out.merge(r_fixed.rename(columns={"rows": "probe_set"}), on=["task", "probe_set"], how="left")
+    out = out.merge(r_clean.rename(columns={"rows": "probe_set"}), on=["task", "regime", "probe_set"], how="left")
+    out["rand_cka_debiased_same_rows"] = out["r_clean"].where(out["probe_set"] == "task_clean", out["r_fixed"])
+    return out.drop(columns=["r_fixed", "r_clean"])
+
+
+def per_task_summary(long, families, eta2, posctrl, scores, n_train: dict, es_epochs: dict, cka_table=None) -> pd.DataFrame:
     """One row per task x regime x ckpt x probe_set (every view with a fine-tuned aggregate dR2).
     es_epochs: {(task, regime): mean best-val epoch over ft seeds}; n_train: {task: fit-set size}."""
     wide = _ft_descriptor_wide(long)
@@ -170,9 +218,11 @@ def per_task_summary(long, families, eta2, posctrl, scores, n_train: dict, es_ep
     if eta2 is not None and len(eta2):
         for fd in eta2["family_def"].unique():
             label = "corr" if fd in CORR_DEFS else fd
-            sub = eta2[eta2["family_def"] == fd][KEYS + ["eta2", "p"]].rename(columns={"eta2": f"eta2_{label}", "p": f"eta2_p_{label}"})
+            sub = eta2[eta2["family_def"] == fd][KEYS + ["eta2", "null_q95", "p"]].rename(
+                columns={"eta2": f"eta2_{label}", "null_q95": f"eta2_q95_{label}", "p": f"eta2_p_{label}"})
+            sub[f"eta2_ratio_{label}"] = sub[f"eta2_{label}"] / sub[f"eta2_q95_{label}"]
             pt = pt.merge(sub, on=KEYS, how="left")
-    for col in ("eta2_p_module", "eta2_p_corr"):
+    for col in ("eta2_p_module", "eta2_p_corr", "eta2_ratio_module", "eta2_ratio_corr"):
         if col not in pt:
             pt[col] = np.nan
     # positive control
@@ -190,7 +240,7 @@ def per_task_summary(long, families, eta2, posctrl, scores, n_train: dict, es_ep
     # es epoch, low confidence
     pt["es_epoch_mean"] = [es_epochs.get((t, r), np.nan) if c == "es" else np.nan for t, r, c in zip(pt["task"], pt["regime"], pt["ckpt"])]
     pt["n_train"] = pt["task"].map(n_train)
-    pt["low_confidence"] = pt["n_train"] < LOW_CONFIDENCE_N
+    pt["low_confidence"] = (pt["n_train"] < LOW_CONFIDENCE_N) | pt["n_train"].isna()  # no meta -> low confidence
     # random-encoder anchor and drift fraction
     pt["a_task"] = np.where(pt["probe_set"].str.startswith("pubchem"), "", pt["task"])
     pt["a_probe_set"] = pt["probe_set"].map(anchor_probe_set)
@@ -208,38 +258,54 @@ def per_task_summary(long, families, eta2, posctrl, scores, n_train: dict, es_ep
     for col in ("gap", "gap_sd"):
         if col not in pt:
             pt[col] = np.nan
-    res = [classify_branch(r.cka_median, r.drop_frac, r.eta2_p_module, r.eta2_p_corr, r.gap, r.gap_sd)
-           if np.isfinite(r.cka_median) and pd.notna(r.eta2_p_module) and pd.notna(r.eta2_p_corr) else (None, None)
-           for r in pt.itertuples()]
-    pt["branch"] = [b for b, _ in res]
-    pt["gap_status"] = [s for _, s in res]
+    pt["branch"], pt["gap_status"] = _branches(pt, "cka_median")
+    # sensitivity analyses (the primary `branch` above is the pre-registered rule)
+    pt = _add_cka_debiased(pt, cka_table)
+    pt["branch_cka_debiased"] = _branches(pt, "cka_debiased_median")[0]
+    pt["branch_eta2_strict"] = _branches(pt, "cka_median", min_ratio=ETA2_STRICT_RATIO)[0]
+    pt["branch_no_eta2"] = _branches(pt, "cka_median", use_eta2=False)[0]
     pt["primary_view"] = pt["probe_set"].isin(PRIMARY_VIEWS) & (pt["regime"] == PRIMARY_CELL[0]) & (pt["ckpt"] == PRIMARY_CELL[1])
     return pt.sort_values(KEYS).reset_index(drop=True)
 
 
-def branch_table(pt: pd.DataFrame) -> pd.DataFrame:
-    """Per task: branch in each primary view at full/es, agreement and the agreed branch."""
-    p = pt[pt["primary_view"] & pt["branch"].notna()]
-    b = p.pivot(index="task", columns="probe_set", values="branch")
+def _branch_pivot(p: pd.DataFrame, col: str, prefix: str) -> pd.DataFrame:
+    b = p.pivot(index="task", columns="probe_set", values=col)
     for v in PRIMARY_VIEWS:
         if v not in b:
             b[v] = None
-    b = b[list(PRIMARY_VIEWS)].rename(columns=lambda v: f"branch_{v}")
-    b["agreed"] = [agree(x, y) for x, y in zip(b[f"branch_{PRIMARY_VIEWS[0]}"], b[f"branch_{PRIMARY_VIEWS[1]}"])]
-    flags = p.groupby("task")["gap_status"].agg(lambda s: "unknown_gap" if (s == "unknown_gap").any() else "ok")
-    b["gap_status"] = flags
+    b = b[list(PRIMARY_VIEWS)]
+    b.columns = [f"{prefix}_{v}" for v in PRIMARY_VIEWS]
+    b[f"{prefix}_agreed" if prefix != "branch" else "agreed"] = [agree(x, y) for x, y in zip(b.iloc[:, 0], b.iloc[:, 1])]
+    b[b.columns[:2]] = b[b.columns[:2]].apply(lambda c: c.where(c.notna(), "missing"))
+    return b
+
+
+def branch_table(pt: pd.DataFrame) -> pd.DataFrame:
+    """Per task (every task with a primary-view row): branch in each primary view at full/es, agreement
+    (agreed branch, `split`, or `missing` if either view lacks a branch), plus the same for each sensitivity
+    variant present in pt (columns <variant>_<view>, <variant>_agreed)."""
+    p = pt[pt["primary_view"]]
+    b = _branch_pivot(p, "branch", "branch")
+    for var in VARIANTS:
+        if var in p:
+            b = b.join(_branch_pivot(p, var, var))
+    b["gap_status"] = p.groupby("task")["gap_status"].agg(lambda s: "unknown_gap" if (s == "unknown_gap").any() else "ok")
     b["low_confidence"] = p.groupby("task")["low_confidence"].first()
     return b.reset_index()
 
 
 def branch_counts(bt: pd.DataFrame) -> pd.DataFrame:
+    """Tasks per branch for the primary rule (variant 'primary') and every sensitivity variant present in bt."""
     rows = []
-    for col in [f"branch_{v}" for v in PRIMARY_VIEWS] + ["agreed"]:
-        vc = bt[col].value_counts()
-        for br in list(BRANCHES) + ["split"]:
-            if col != "agreed" and br == "split":
-                continue
-            rows.append(dict(view=col.replace("branch_", ""), branch=br, n_tasks=int(vc.get(br, 0))))
+    for var, prefix in [("primary", "branch")] + [(v.replace("branch_", ""), v) for v in VARIANTS if f"{v}_agreed" in bt]:
+        agreed = "agreed" if prefix == "branch" else f"{prefix}_agreed"
+        for col in [f"{prefix}_{v}" for v in PRIMARY_VIEWS] + [agreed]:
+            vc = bt[col].value_counts()
+            for br in list(BRANCHES) + ["split", "missing"]:
+                if col != agreed and br == "split":
+                    continue
+                rows.append(dict(variant=var, view=col.replace(f"{prefix}_", "") if col != agreed else "agreed", branch=br,
+                                 n_tasks=int(vc.get(br, 0))))
     return pd.DataFrame(rows)
 
 
@@ -279,7 +345,9 @@ def cross_task_primary(ct: pd.DataFrame) -> pd.DataFrame:
 
 # ---------------------------------------------------------------- PC spectrum, posctrl, comparisons
 def pc_spectrum(long: pd.DataFrame, views=PRIMARY_VIEWS, cells=(("full", "es"), ("n128", "es"))) -> pd.DataFrame:
-    """Mean over tasks of the seed-mean dR2 per PC index (eligible PCs only), for the *_pc versions of the views."""
+    """Mean over tasks of the seed-mean dR2 per PC index (eligible PCs only), for the *_pc versions of the views.
+    n_tasks = tasks in which the PC is eligible; frac_eligible = n_tasks / tasks with the view (the figure plots task views
+    only where frac_eligible >= PC_PLOT_MIN_FRAC, because eligibility varies by task and the mean would change composition)."""
     rows = []
     for v in views:
         for reg, ck in cells:
@@ -290,9 +358,12 @@ def pc_spectrum(long: pd.DataFrame, views=PRIMARY_VIEWS, cells=(("full", "es"), 
             w = w[w["dropped"].notna()].reset_index()
             w["pc"] = w["descriptor"].str.replace("PC", "").astype(int)
             g = w.groupby("pc")["delta_r2_mean"]
+            n_total = d["task"].nunique()
             rows.append(pd.DataFrame(dict(view=v, regime=reg, ckpt=ck, pc=g.mean().index, mean_dr2=g.mean().values,
-                                          sem=g.sem().values, n_tasks=g.size().values)))
-    return pd.concat(rows, ignore_index=True) if rows else pd.DataFrame(columns=["view", "regime", "ckpt", "pc", "mean_dr2", "sem", "n_tasks"])
+                                          sem=g.sem().values, n_tasks=g.size().values, n_tasks_total=n_total,
+                                          frac_eligible=g.size().values / n_total)))
+    cols = ["view", "regime", "ckpt", "pc", "mean_dr2", "sem", "n_tasks", "n_tasks_total", "frac_eligible"]
+    return pd.concat(rows, ignore_index=True) if rows else pd.DataFrame(columns=cols)
 
 
 def pc_summaries(long: pd.DataFrame) -> pd.DataFrame:
