@@ -125,7 +125,10 @@ pretraining experiment is the test.
   descriptors are free, P can be raised after the compute gate if GPU time allows.
 - **Hyperparameters:** identical across arms, taken from the how-to-train defaults
   (MP hidden 2048, depth 6, FFN 2048×1, random-dropout MSE 0.30, warmup/one-cycle LR,
-  patience 5, max epochs 100); the FFN output dimension follows the set size. Record the
+  **patience 15**, max epochs 100). Patience was raised from 5 after the first T100 run
+  (patience 5) stopped at epoch 19 on transient train-loss spikes while B was still
+  improving smoothly — a training-length confound between arms. The patience-5 runs of
+  B, T100 and R100 are kept as `*_p5` for comparison.; the FFN output dimension follows the set size. Record the
   exact config; it applies to all arms.
 - **Budget:** same max epochs and patience for all arms (early stopping on pool validation
   loss is fine here — it is not the task's data).
