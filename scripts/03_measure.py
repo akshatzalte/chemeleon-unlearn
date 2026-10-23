@@ -193,7 +193,7 @@ def pc_task(name, pub: Pubchem, pca):
     res = compare_to_pre(Ypc, Yp, {e: predict_probe(Z, Ypc, **kw) for e, Z in Zr.items()}, Zp, Zr,
                          {e: allrows for e in Zr})
     out.append(pc_long_rows(res, pcn, dict(task=name, regime="", ckpt="", probe_set="task_all_pc"), "rand", evr))
-    for regime in config.REGIMES:
+    for regime in regimes_of(runs):
         clean = {seed: clean_rows(runs[(regime, seed)], n) for seed in SEEDS}
         for ckpt in CKPTS:
             Zt, Zq = {}, {}
@@ -270,7 +270,7 @@ def novel_task(name, pub: Pubchem, mods, pca):
     Pp = predict_probe(Zp, YY, **kw)
     out = []
     summary = {"n": n, "n_novel": int(len(novel)), "membership": {m: int((member == m).sum()) for m in ("train", "val", "test", "none")}}
-    for regime in config.REGIMES:
+    for regime in regimes_of(runs):
         clean = {seed: clean_rows(runs[(regime, seed)], n) for seed in SEEDS}
         for ckpt in CKPTS:
             Zt = {}
@@ -347,7 +347,7 @@ def ownalpha_task(name, pub: Pubchem):
     cache_p = d / "ownalpha_alphas.json"
     cache = _cached_alphas(cache_p)
     out = []
-    for regime in config.REGIMES:
+    for regime in regimes_of(runs):
         Zq = {}
         for seed in SEEDS:
             dd = runs[(regime, seed)]["dir"]
@@ -364,10 +364,19 @@ def ownalpha_task(name, pub: Pubchem):
     log(f"{name}: own-alpha done in {time.time() - t0:.0f}s {cache}")
 
 
+def regimes_of(runs):
+    """Regimes present in an expected_runs dict, in config order."""
+    return [r for r in config.REGIMES if any(k[0] == r for k in runs)]
+
+
 def expected_runs(name):
-    """{(regime, seed): run dict} for ft runs; None if any is missing a done.json."""
+    """{(regime, seed): run dict} for ft runs; None if any is missing a done.json.
+    n128 is skipped for tasks with n_train <= N_SMALL (finetune.worklist never runs it)."""
     out = {}
+    small = len(load_task(name).train_smiles) <= config.N_SMALL
     for regime in config.REGIMES:
+        if regime == "n128" and small:
+            continue
         for seed in SEEDS:
             d = RUNS / slug(name) / regime / "ft" / f"seed{seed}"
             if not (d / "done.json").exists():
@@ -424,7 +433,7 @@ def measure_task(name, pub: Pubchem, mods, cluster_map, device):
     L.append(long_rows(res, names, dict(task=name, regime="", ckpt="", probe_set="task_all"), "rand"))
 
     mp_pre = load_mp(config.CHEMELEON_MP)
-    for regime in config.REGIMES:
+    for regime in regimes_of(runs):
         clean = {seed: clean_rows(runs[(regime, seed)], n) for seed in SEEDS}
         for ckpt in CKPTS:
             Zt, Zq = {}, {}

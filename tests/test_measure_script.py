@@ -51,6 +51,7 @@ def env(tmp_path, monkeypatch):
     (tmp_path / "descriptors").mkdir()
     D.assign(smiles=task.train_smiles).to_parquet(tmp_path / "descriptors" / f"{config.slug(NAME)}.parquet")
     runs = make_runs()
+    S.real_expected_runs = S.expected_runs
     monkeypatch.setattr(S, "OUT", tmp_path / "drift")
     monkeypatch.setattr(S, "GLOBAL", tmp_path / "drift" / "_global")
     monkeypatch.setattr(S, "DATA", tmp_path)
@@ -158,3 +159,38 @@ def test_measure_task_and_pc_task_row_selection(env, monkeypatch):
     pc = pd.read_parquet(d / "drift_long_pc.parquet")
     assert set(pc.probe_set) == {"pubchem_pc", "task_all_pc", "task_clean_pc"}
     assert set(pc[pc.measure == "delta_r2_evrw"].descriptor) == {""}
+
+
+def test_small_task_measured_with_full_regime_only(env, monkeypatch):
+    S, pub, mods, pca, _, tmp = env
+    n = 100                                                   # <= N_SMALL: no n128 runs exist
+    task = fake_task(n, "regression")
+    D = pd.DataFrame(np.random.default_rng(1).normal(size=(n, 6)), columns=DESC)
+    D.assign(smiles=task.train_smiles).to_parquet(tmp / "descriptors" / f"{config.slug(NAME)}.parquet")
+    runs_dir = tmp / "runs"
+    for sd in SEEDS:
+        d = runs_dir / config.slug(NAME) / "full" / "ft" / f"seed{sd}"
+        d.mkdir(parents=True)
+        (d / "done.json").write_text("{}")
+        val = list(range(sd % 10, n, 5))
+        (d / "run.json").write_text(json.dumps(dict(regime="full", seed=sd, val_idx=val,
+                                                    train_idx=[i for i in range(n) if i not in val])))
+    monkeypatch.setattr(S, "load_task", lambda name: task)
+    monkeypatch.setattr(S, "RUNS", runs_dir)
+    monkeypatch.setattr(S, "expected_runs", S.real_expected_runs)
+    monkeypatch.setattr(S, "pretrain_membership", lambda smi: np.array(["none"] * 50 + ["train"] * 50, dtype=object))
+    got = S.expected_runs(NAME)
+    assert got is not None and len(got) == 3 and S.regimes_of(got) == ["full"]
+    S.measure_task(NAME, pub, mods, {}, "cpu")
+    d = S.OUT / S.slug(NAME)
+    assert set(json.loads((d / "done.json").read_text())["n_clean"]) == {f"full/s{sd}" for sd in SEEDS}
+    for fn, call in (("drift_long.parquet", None), ("drift_long_pc.parquet", lambda: S.pc_task(NAME, pub, pca)),
+                     ("drift_long_novel.parquet", lambda: S.novel_task(NAME, pub, mods, pca)),
+                     ("drift_long_ownalpha.parquet", lambda: S.ownalpha_task(NAME, pub))):
+        if call:
+            call()
+        df = pd.read_parquet(d / fn)
+        assert set(df[df.regime != ""].regime) == {"full"}, fn
+    # a task with n128 runs missing but n_train > N_SMALL is still "not all done"
+    monkeypatch.setattr(S, "load_task", lambda name: fake_task(N, "regression"))
+    assert S.expected_runs(NAME) is None
