@@ -26,6 +26,7 @@ from drift.measure import (effdim_table, fit_pca, pc_long_rows, pc_scores, alpha
 from drift.measure import LONG_COLS as LONG_COLS_
 from drift.probe import choose_alpha, make_folds
 from drift.stats import correlation_clusters, positive_control
+from drift.pubchem import pretrain_membership
 from drift.tasks import load_task
 
 OUT = RESULTS / "drift"
@@ -217,6 +218,100 @@ def pc_task(name, pub: Pubchem, pca):
     log(f"{name}: PC views done in {time.time() - t0:.0f}s")
 
 
+MIN_ROWS = 30
+
+
+def check_pubchem_membership(pub: Pubchem):
+    p = GLOBAL / "pubchem_membership.json"
+    if p.exists():
+        return
+    m = pretrain_membership(pub.smiles)
+    counts = {k: int((m == k).sum()) for k in ("train", "val", "test", "none")}
+    p.write_text(json.dumps(counts))
+    log(f"PubChem probe sample pretrain membership: {counts} (expected all test)")
+
+
+def _nrows(base, enc, n):
+    return pd.DataFrame([dict(base, encoder=enc, measure="n_rows", descriptor="", value=float(n))])[LONG_COLS_]
+
+
+def _nan_view(base, enc):
+    return pd.DataFrame([dict(base, encoder=enc, measure="delta_r2_mean", descriptor="", value=float("nan"))])[LONG_COLS_]
+
+
+def novel_task(name, pub: Pubchem, mods, pca):
+    """Pretraining-overlap views: task_{all,clean}_{novel,nonnovel} (descriptors) and
+    task_{all,clean}_novel_pc (PC targets); n_rows for every task view. Marker novel_done.json."""
+    d = OUT / slug(name)
+    if (d / "novel_done.json").exists() or not (d / "done.json").exists():
+        return
+    t0 = time.time()
+    s = slug(name)
+    runs = expected_runs(name)
+    meta = json.loads((d / "done.json").read_text())
+    task = load_task(name)
+    n = len(task.train_smiles)
+    smi = list(task.train_smiles)
+    dev = pub.device
+    member = pretrain_membership(smi)
+    novel = np.flatnonzero(np.isin(member, ["test", "none"]))
+    nonnovel = np.setdiff1d(np.arange(n), novel)
+    Draw = pd.read_parquet(DATA / f"descriptors/{s}.parquet")
+    T = prepare_targets(Draw[list(mods.index)], np.arange(n))
+    Y = T.Y.astype(np.float64)
+    names = T.names
+    Ypc = pc_scores(Draw[pca["names"]].to_numpy(dtype=np.float64, na_value=np.nan), pca["mu"], pca["sd"], pca)
+    k, ky = Ypc.shape[1], Y.shape[1]
+    pcn, evr = pc_names(k), pca["evr"]
+    YY = np.hstack([Y, Ypc])
+    folds = make_folds(n, config.N_FOLDS, 0)
+    kw = dict(mode="crossfit", folds=folds, alpha=meta["alpha_task"])
+    Zp = get_emb(s, "pre", lambda: load_mp(config.CHEMELEON_MP), smi, dev)
+    Pp = predict_probe(Zp, YY, **kw)
+    out = []
+    summary = {"n": n, "n_novel": int(len(novel)), "membership": {m: int((member == m).sum()) for m in ("train", "val", "test", "none")}}
+    for regime in config.REGIMES:
+        clean = {seed: clean_rows(runs[(regime, seed)], n) for seed in SEEDS}
+        for ckpt in CKPTS:
+            Zt = {}
+            for seed in SEEDS:
+                dd = runs[(regime, seed)]["dir"]
+                Zt[f"seed{seed}"] = get_emb(s, f"{s}__{regime}__s{seed}__{ckpt}",
+                                            lambda dd=dd, ckpt=ckpt: load_mp(dd / f"{ckpt}_mp.pt"), smi, dev)
+            P = {e: predict_probe(Z, YY, **kw) for e, Z in Zt.items()}
+            Pd_, Pc_ = {e: v[:, :ky] for e, v in P.items()}, {e: v[:, ky:] for e, v in P.items()}
+            Ppd, Ppc = Pp[:, :ky], Pp[:, ky:]
+            b0 = dict(task=name, regime=regime, ckpt=ckpt)
+            views = {  # name -> (rows per seed, with descriptor?, with pc?)
+                "task_all": ({e: np.arange(n) for e in Zt}, False, False),
+                "task_clean": ({f"seed{sd}": clean[sd] for sd in SEEDS}, False, False),
+                "task_all_novel": ({e: novel for e in Zt}, True, True),
+                "task_all_nonnovel": ({e: nonnovel for e in Zt}, True, False),
+                "task_clean_novel": ({f"seed{sd}": np.intersect1d(clean[sd], novel) for sd in SEEDS}, True, True),
+                "task_clean_nonnovel": ({f"seed{sd}": np.intersect1d(clean[sd], nonnovel) for sd in SEEDS}, True, False),
+            }
+            for view, (rows, do_desc, do_pc) in views.items():
+                b = dict(b0, probe_set=view)
+                for e, r in rows.items():
+                    out.append(_nrows(b, e, len(r)))
+                if not do_desc:
+                    continue
+                if min(len(r) for r in rows.values()) < MIN_ROWS:
+                    out.append(_nan_view(b, "ft"))
+                    if do_pc:
+                        out.append(_nan_view(dict(b0, probe_set=view + "_pc"), "ft"))
+                    continue
+                res = compare_to_pre(Y, Ppd, Pd_, Zp, Zt, rows)
+                out.append(long_rows(res, names, b, "ft"))
+                if do_pc:
+                    res = compare_to_pre(Ypc, Ppc, Pc_, Zp, Zt, rows)
+                    out.append(pc_long_rows(res, pcn, dict(b0, probe_set=view + "_pc"), "ft", evr))
+            log(f"  {name} novel {regime}/{ckpt} done ({time.time() - t0:.0f}s)")
+    pd.concat(out, ignore_index=True).to_parquet(d / "drift_long_novel.parquet")
+    (d / "novel_done.json").write_text(json.dumps({**summary, "seconds": time.time() - t0}))
+    log(f"{name}: novel views done in {time.time() - t0:.0f}s {summary}")
+
+
 def device_of(pub):
     return pub.device
 
@@ -378,7 +473,7 @@ def combine():
         parts = sorted(OUT.glob(f"*/{f}.parquet"))
         parts = [p for p in parts if p.parent.name == "_global" or (p.parent / "done.json").exists()]
         if f == "drift_long":
-            parts += sorted(OUT.glob("*/drift_long_ownalpha.parquet")) + sorted(OUT.glob("*/drift_long_pc.parquet"))
+            parts += sorted(OUT.glob("*/drift_long_ownalpha.parquet")) + sorted(OUT.glob("*/drift_long_pc.parquet")) + sorted(OUT.glob("*/drift_long_novel.parquet"))
         df = pd.concat([pd.read_parquet(p) for p in parts], ignore_index=True)
         df.to_parquet(RESULTS / f"{f}.parquet")
         log(f"combined {f}: {len(df)} rows from {len(parts)} parts")
@@ -408,6 +503,7 @@ def main():
     ensure_global(pub, mods)
     if a.ownalpha:
         ensure_global_ownalpha(pub)
+    check_pubchem_membership(pub)
     pca = None
     if a.pc:
         ensure_global_pc(pub, mods)
@@ -425,6 +521,7 @@ def main():
             ownalpha_task(name, pub)
         if a.pc:
             pc_task(name, pub, pca)
+            novel_task(name, pub, mods, pca)
 
 
 if __name__ == "__main__":
