@@ -23,6 +23,9 @@ def _canon(s):
     return Chem.MolToSmiles(m, isomericSmiles=False) if m is not None else None
 
 
+canonical = _canon  # public name: non-isomeric canonical SMILES, or None if RDKit rejects the input
+
+
 def _split_map(smiles_file: Path, cache: Path, nproc: int) -> dict:
     key = (str(smiles_file), str(cache))
     if key in _SPLIT_MAPS:

@@ -1,11 +1,15 @@
 """Shared test helpers. Import in tests with `from conftest import fake_task, ...`
 (pytest puts tests/ on sys.path)."""
+from __future__ import annotations
+
 import json
+from typing import TYPE_CHECKING
 
 import numpy as np
 import pandas as pd
 
-from drift.tasks import TaskData
+if TYPE_CHECKING:  # drift.tasks needs astartes (phase-1 env only); keep conftest importable under $PY2
+    from drift.tasks import TaskData
 
 REAL_SMILES = [
     'CC(=O)Oc1ccccc1C(=O)O',
@@ -106,6 +110,8 @@ def _labels(n, kind, pos_frac, rng):
 
 
 def _build(smiles, test_smiles, name, kind, pos_frac, seed=0):
+    from drift.tasks import TaskData
+
     rng = np.random.default_rng(seed)
     y = _labels(len(smiles), kind, pos_frac, rng)
     return TaskData(
