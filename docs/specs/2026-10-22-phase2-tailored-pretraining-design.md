@@ -149,9 +149,9 @@ pretraining experiment is the test.
 - **Protocol (phase-1 runner, `drift.finetune.run_one`, with graph caching ON):**
   - N ≥ 128: paper protocol (80/20 train/val, max 50 epochs, patience-5 early stopping,
     es checkpoint).
-  - N ≤ 64 (D3): no validation split; train on all N for a fixed number of epochs
-    E = 6 (D6; chemprop's default 2 warm-up epochs then one-cycle decay over the remaining
-    4). Record it. The "es" checkpoint is the final weights.
+  - N ≤ 64 (D3): no validation split; train on all N for a fixed number of optimizer steps
+    (D6: 16 steps, batch min(N, 16); chemprop's default 2 warm-up steps then one-cycle decay
+    over the remaining 14). Record it. The "es" checkpoint is the final weights.
   - Head: paper head (hidden 256); regression targets standardized on the subsample.
 - **Scoring:** `scripts/05_score.py` protocol; benchmark main metrics are `roc_auc`
   (Ames, higher better) and `mean_absolute_error` (LD50, lower better) — sign-normalize.
@@ -215,6 +215,16 @@ optional queued replication, B and T100 on the full ~941k pool.
   version drift in the authors' run; worst: nHBAcc, +1–5 on ~15% of molecules). Affected
   set members: T25 — MIC3; T100 — 6 of 100 incl. nHBAcc; R25a — nHBAcc; R25b — IC4; R100 —
   3. Too small to change cluster ranks; recorded in `data/phase2/pool/build.json`.
+- Subsamples are **nested across N for a given seed** (N16_s0 ⊂ N32_s0 ⊂ …), so the gap(N)
+  points of one seed are positively correlated; the per-N SDs and the Spearman(gap, log N)
+  criterion therefore overstate the effective number of independent points.
+- Arms stop at **different epochs** (per-arm early-stopping monitor on pool validation loss,
+  patience 15), while the one-cycle LR schedule is fixed to a 100-epoch horizon, so an arm
+  that stops early never reaches the low-LR end of the schedule. Report `epochs_run`,
+  `best_epoch` and `best_val_loss` per arm (done.json) next to the ladder results.
+- The public-CheMeleon reference arm was pretrained on a pool that included the Ames/LD50
+  test molecules and on the original (not recomputed) targets; it is a reference line only,
+  not a controlled arm.
 
 ## 10. Left to the builder
 
