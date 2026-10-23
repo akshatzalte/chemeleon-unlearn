@@ -118,9 +118,11 @@ pretraining experiment is the test.
 - **Molecule pool:** a fixed random subset of `cleaned_pubchem_1MM.smiles` of size
   **P = 200k** (fallback 100k if the compute gate fails), seed fixed, with Ames and LD50
   Polaris test molecules removed by non-isomeric canonical SMILES match. Same pool, same
-  train/val split for every arm. Descriptors from the existing Mordred pipeline
-  (`drift.descriptors.compute_mordred`), standardized per descriptor on the pool's train
-  split, winsorized at ±6 SD, as CheMeleon did; each arm takes the column subset.
+  train/val split for every arm. Descriptors are **not recomputed**: they are read from CheMeleon's
+  published pretraining descriptors (Zenodo 15733575, `pubchem_1MM.zarr`, row-aligned with
+  the cleaned SMILES file), standardized per descriptor on the **pool's train split only**
+  (never the full 1M), winsorized at ±6 SD; each arm then takes its column subset. Because
+  descriptors are free, P can be raised after the compute gate if GPU time allows.
 - **Hyperparameters:** identical across arms, taken from the how-to-train defaults
   (MP hidden 2048, depth 6, FFN 2048×1, random-dropout MSE 0.30, warmup/one-cycle LR,
   patience 5, max epochs 100); the FFN output dimension follows the set size. Record the
