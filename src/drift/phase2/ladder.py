@@ -109,9 +109,53 @@ def arm_mp_path(arm: str) -> Path:
     return config.CHEMELEON_MP if arm == "chemeleon" else pretrain_dir(arm) / "mp.pt"
 
 
+REQUIRED_PATIENCE = 15
+REQUIRED_N_TRAIN = 180000
+
+
+def _pretrain_config(arm: str) -> dict | None:
+    p = pretrain_dir(arm) / "config.json"
+    return json.loads(p.read_text()) if p.exists() else None
+
+
+def _pool_id(cfg: dict) -> str:
+    return hashlib.sha1(json.dumps(cfg.get("pool_build"), sort_keys=True).encode()).hexdigest()[:12]
+
+
+def _config_problem(arm: str) -> str | None:
+    """Why this arm's pretraining config.json is not the final protocol (None = fine)."""
+    cfg = _pretrain_config(arm)
+    if cfg is None:
+        return f"no config.json in {pretrain_dir(arm)}"
+    if cfg.get("patience") != REQUIRED_PATIENCE:
+        return f"config.json patience={cfg.get('patience')} (need {REQUIRED_PATIENCE})"
+    if cfg.get("n_train") != REQUIRED_N_TRAIN:
+        return f"config.json n_train={cfg.get('n_train')} (need {REQUIRED_N_TRAIN})"
+    if cfg.get("pool_build") is None:
+        return "config.json has no pool_build"
+    return None
+
+
 def arm_ready(arm: str) -> bool:
-    """CheMeleon always; pretrained arms once their pretraining wrote done.json (and mp.pt)."""
-    return arm == "chemeleon" or ((pretrain_dir(arm) / "done.json").exists() and arm_mp_path(arm).exists())
+    """CheMeleon always. A pretrained arm is ready once it wrote done.json and mp.pt AND its config.json shows the
+    final protocol (patience 15, the full 180000-row train pool) on the same pool_build as every other arm that
+    passes those checks (a mismatch rejects all of the disagreeing arms). A rejected arm is logged with the reason."""
+    if arm == "chemeleon":
+        return True
+    if not ((pretrain_dir(arm) / "done.json").exists() and arm_mp_path(arm).exists()):
+        return False
+    problem = _config_problem(arm)
+    if problem is None:
+        mine = _pool_id(_pretrain_config(arm))
+        others = {a: _pool_id(c) for a in ARMS if a not in (arm, "chemeleon")
+                  if (pretrain_dir(a) / "done.json").exists() and _config_problem(a) is None
+                  and (c := _pretrain_config(a)) is not None}
+        differing = sorted(a for a, pid in others.items() if pid != mine)
+        if differing:
+            problem = f"pool_build {mine} differs from that of arm(s) {', '.join(differing)}"
+    if problem:
+        log.warning("arm %s: finished but NOT ready: %s", arm, problem)
+    return problem is None
 
 
 def worklist(tasks=TASKS, arms=ARMS, sizes=SIZES, seeds_for: dict | None = None) -> list[tuple[str, str, object, int]]:

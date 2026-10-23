@@ -79,7 +79,7 @@ def _loader(ds: PoolDataset, num_workers: int, shuffle: bool) -> DataLoader:
 
 
 def train(arm: str, pool_dir: Path, sets_dir: Path, out_dir: Path, gpu: int, max_epochs: int = 100,
-          limit_rows: int | None = None, patience: int = 5, num_workers: int = 4, seed: int = 0) -> dict:
+          limit_rows: int | None = None, patience: int = 15, num_workers: int = 4, seed: int = 0) -> dict:
     """Pretrain on the pool for the arm's descriptor set; write mp.pt, head.pt, metrics.csv, config.json,
     done.json (last) to out_dir. gpu < 0 trains on CPU. Returns timing info (also written to done.json)."""
     pool_dir, sets_dir, out_dir = Path(pool_dir), Path(sets_dir), Path(out_dir)

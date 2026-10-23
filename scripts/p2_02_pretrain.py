@@ -1,6 +1,6 @@
 """Phase 2, step 2: pretrain one arm (run under $PY2).
 
-    $PY2 scripts/p2_02_pretrain.py --arm T100 --gpu 0 [--max-epochs 100] [--limit-rows R] [--out DIR]
+    $PY2 scripts/p2_02_pretrain.py --arm T100 --gpu 0 [--max-epochs 100] [--patience 15] [--seed 0] [--limit-rows R] [--out DIR]
 
 Trains the CheMeleon-architecture D-MPNN on the pool (data/phase2/pool) to predict the descriptors listed in
 data/phase2/sets/<arm>.txt. Output (default runs/phase2/pretrain/<arm>/): mp.pt (chemeleon_mp.pt format),
@@ -23,19 +23,24 @@ POOL = config.DATA / "phase2" / "pool"
 SETS = config.DATA / "phase2" / "sets"
 
 
-def main() -> int:
+def parse_args(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--arm", required=True)
     ap.add_argument("--gpu", type=int, required=True)
     ap.add_argument("--max-epochs", type=int, default=100)
     ap.add_argument("--limit-rows", type=int, default=None)
-    ap.add_argument("--patience", type=int, default=5)
+    ap.add_argument("--patience", type=int, default=15)
+    ap.add_argument("--seed", type=int, default=0, help="torch/lightning seed and the training-row permutation seed")
     ap.add_argument("--num-workers", type=int, default=4)
     ap.add_argument("--out", default=None)
-    args = ap.parse_args()
+    return ap.parse_args(argv)
+
+
+def main() -> int:
+    args = parse_args()
     out = Path(args.out) if args.out else config.RUNS / "phase2" / "pretrain" / args.arm
     info = pretrain.train(args.arm, POOL, SETS, out, args.gpu, args.max_epochs, args.limit_rows,
-                          args.patience, args.num_workers)
+                          args.patience, args.num_workers, args.seed)
     print(json.dumps({k: v for k, v in info.items() if k != "epoch_seconds"}, indent=2))
     return 0
 

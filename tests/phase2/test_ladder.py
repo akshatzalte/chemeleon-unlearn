@@ -150,11 +150,17 @@ def ladder_env(tmp_path, monkeypatch):
     return tmp_path
 
 
-def _make_arm(arm):
+POOL_BUILD = {"n_train": 180000, "n_val": 20000, "seed": 0, "wall_s": 26.2}
+
+
+def _make_arm(arm, patience=15, n_train=180000, pool_build=None, config_json=True):
     d = L.pretrain_dir(arm)
     d.mkdir(parents=True)
     shutil.copy(config.CHEMELEON_MP, d / "mp.pt")
     (d / "done.json").write_text("{}")
+    if config_json:
+        (d / "config.json").write_text(json.dumps(dict(
+            arm=arm, patience=patience, n_train=n_train, pool_build=POOL_BUILD if pool_build is None else pool_build)))
 
 
 def test_run_json_records_sha_and_arm(ladder_env):
@@ -207,6 +213,44 @@ def test_worklist_and_pending_skip_arms_without_encoder(ladder_env, caplog):
     # a finished arm without mp.pt, or mp.pt without done.json, is not runnable
     (L.pretrain_dir("B") / "mp.pt").unlink()
     assert not L.arm_ready("B")
+
+
+def test_arm_ready_requires_patience_15_full_pool_and_consistent_pool(ladder_env, caplog):
+    assert L.arm_ready("chemeleon")  # always, no files needed
+    _make_arm("B")
+    _make_arm("T25")
+    assert L.arm_ready("B") and L.arm_ready("T25")
+    assert not L.arm_ready("T100")  # nothing on disk
+    # stale patience-5 run (the first two arms were launched with patience 5)
+    _make_arm("T100", patience=5)
+    with caplog.at_level(logging.WARNING):
+        assert not L.arm_ready("T100")
+    assert "T100" in caplog.text and "patience" in caplog.text and "5" in caplog.text
+    # smoke-sized run
+    caplog.clear()
+    _make_arm("R25a", n_train=2000)
+    with caplog.at_level(logging.WARNING):
+        assert not L.arm_ready("R25a")
+    assert "R25a" in caplog.text and "n_train" in caplog.text and "2000" in caplog.text
+    # no config.json at all
+    _make_arm("R25b", config_json=False)
+    caplog.clear()
+    with caplog.at_level(logging.WARNING):
+        assert not L.arm_ready("R25b")
+    assert "R25b" in caplog.text and "config.json" in caplog.text
+
+
+def test_arm_ready_rejects_pool_build_mismatch(ladder_env, caplog):
+    _make_arm("B")
+    _make_arm("T25", pool_build={**POOL_BUILD, "seed": 1})  # built from a different pool
+    caplog.clear()
+    with caplog.at_level(logging.WARNING):
+        assert not L.arm_ready("T25") and not L.arm_ready("B")  # inconsistent pair: neither is trusted
+    assert "pool_build" in caplog.text
+    # re-pretraining the odd arm on the right pool fixes both
+    shutil.rmtree(L.pretrain_dir("T25"))
+    _make_arm("T25")
+    assert L.arm_ready("B") and L.arm_ready("T25")
 
 
 def test_ft_seed_mapping():

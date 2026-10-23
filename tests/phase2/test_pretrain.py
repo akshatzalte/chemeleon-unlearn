@@ -127,3 +127,30 @@ def test_checkpoint_loadable_by_phase1(tiny):
     )
     r = subprocess.run([PY1, "-c", code], capture_output=True, text=True, env={"OMP_NUM_THREADS": "8", "PATH": "/usr/bin:/bin"})
     assert r.returncode == 0 and "OK" in r.stdout, r.stderr[-2000:]
+
+
+def test_defaults_patience_15_seed_0_recorded_in_config(tiny):
+    """The queue passes --patience 15; the function and script defaults must agree with it, and the seed is recorded."""
+    import importlib.util
+    import inspect
+
+    sig = inspect.signature(PT.train).parameters
+    assert sig["patience"].default == 15 and sig["seed"].default == 0
+    spec = importlib.util.spec_from_file_location("p2_02", Path(__file__).parents[2] / "scripts" / "p2_02_pretrain.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    a = mod.parse_args(["--arm", "B", "--gpu", "0"])
+    assert a.patience == 15 and a.seed == 0
+    assert mod.parse_args(["--arm", "B", "--gpu", "0", "--seed", "3"]).seed == 3
+    cfg = json.loads((tiny["out"] / "config.json").read_text())
+    assert cfg["patience"] == 15 and cfg["seed"] == 0
+
+
+def test_seed_changes_permutation_and_is_recorded(tiny, tmp_path):
+    out = tmp_path / "s7"
+    PT.train("X", tiny["pool"], tiny["sets"], out, gpu=-1, max_epochs=1, num_workers=0, seed=7)
+    assert json.loads((out / "config.json").read_text())["seed"] == 7
+    cols = np.arange(5)
+    mk = lambda seed: PD.PoolDataset(REAL_SMILES[:64], np.zeros((64, 5), np.float32), cols, np.zeros(5), np.ones(5),
+                                     16, True, seed)
+    assert not np.array_equal(mk(0).batch_rows(0), mk(7).batch_rows(0))
