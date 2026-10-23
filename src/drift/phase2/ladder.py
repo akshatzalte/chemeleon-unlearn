@@ -122,10 +122,14 @@ def worklist(tasks=TASKS, arms=ARMS, sizes=SIZES, seeds_for: dict | None = None)
 
 
 def shard_items(items: list, i: int, n: int) -> list:
-    """Shard i of n of the FULL worklist (apply before any arm/task filter). Plain `items[i::n]` would give each
-    shard a fixed subset of arms whenever n divides len(ARMS); the `k // len(ARMS)` skew rotates arms over shards.
-    Sub-sharding is consistent: key % (n*J) == i + n*j implies key % n == i."""
-    return [it for k, it in enumerate(items) if (k + k // len(ARMS)) % n == i]
+    """Shard i of n of the FULL worklist (apply before any arm/task filter). The worklist is a (block, arm) grid
+    (arms vary fastest), so plain `items[i::n]` pins arms to shards whenever n shares a factor with len(ARMS).
+    Instead item k = (block b, arm a) gets the key a * n_blocks + b (the transposed grid) and goes to shard
+    `key % n`: along b the residues cycle through every value, so each shard sees every arm for every n.
+    Sub-sharding is consistent because the key is independent of n: key % (n*J) == i + n*j implies key % n == i."""
+    A = len(ARMS)
+    n_blocks = -(-len(items) // A)
+    return [it for k, it in enumerate(items) if ((k % A) * n_blocks + k // A) % n == i]
 
 
 def pending(items: list) -> list:

@@ -214,15 +214,37 @@ def test_ft_seed_mapping():
     assert [L.ft_seed(16, s) for s in (0, 1, 9)] == [42, 1042, 9042]
 
 
-def test_shards_partition_worklist_and_mix_arms():
+@pytest.mark.parametrize("n", [2, 3, 4, 6, 8])
+def test_shards_partition_worklist_and_mix_arms(n):
     wl = L.worklist()
-    for n in (2, 4, 8):
-        parts = [L.shard_items(wl, i, n) for i in range(n)]
-        assert set(sum(parts, [])) == set(wl) and sum(len(p) for p in parts) == len(wl)
-        for p in parts:
-            assert len({a for _, a, _, _ in p}) == len(L.ARMS)  # every shard sees every arm
-    # sub-sharding (--jobs-per-gpu J): children of shard i/n partition it exactly
-    n, J = 2, 3
+    parts = [L.shard_items(wl, i, n) for i in range(n)]
+    flat = sum(parts, [])
+    assert len(flat) == len(wl) and set(flat) == set(wl)  # every item in exactly one shard
+    for p in parts:
+        assert len(p) >= len(L.ARMS) and len({a for _, a, _, _ in p}) == len(L.ARMS)  # every shard sees every arm
+        # ... and every task and size too
+        assert {t for t, _, _, _ in p} == set(L.TASKS) and {x for _, _, x, _ in p} == set(L.SIZES)
+    assert max(map(len, parts)) - min(map(len, parts)) <= len(wl) // n * 0.05 + 1  # balanced
+
+
+@pytest.mark.parametrize("n, J", [(1, 2), (2, 3), (3, 2), (2, 4), (4, 2), (1, 8), (3, 3)])
+def test_subsharding_children_partition_parent(n, J):
+    """--jobs-per-gpu J: shard i/n -> children (i + n*j)/(n*J); they partition the parent and each child mixes arms."""
+    wl = L.worklist()
     for i in range(n):
-        kids = sum((L.shard_items(wl, i + n * j, n * J) for j in range(J)), [])
-        assert set(kids) == set(L.shard_items(wl, i, n)) and len(kids) == len(L.shard_items(wl, i, n))
+        parent = L.shard_items(wl, i, n)
+        kids = [L.shard_items(wl, i + n * j, n * J) for j in range(J)]
+        flat = sum(kids, [])
+        assert len(flat) == len(parent) and set(flat) == set(parent)
+        for k in kids:
+            assert {a for _, a, _, _ in k} == set(L.ARMS)
+
+
+def test_shard_key_does_not_pin_arms_for_6_shards():
+    """The old key (k + k//8) % n pinned arms to children whenever n shared a factor with 9 (n = 3, 6)."""
+    wl = L.worklist()
+    for i in range(6):
+        per_arm = {a: 0 for a in L.ARMS}
+        for _, a, _, _ in L.shard_items(wl, i, 6):
+            per_arm[a] += 1
+        assert min(per_arm.values()) > 0.5 * len(wl) / 6 / len(L.ARMS)
