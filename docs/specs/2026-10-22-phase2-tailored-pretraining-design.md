@@ -1,6 +1,6 @@
 # Phase 2: task-tailored descriptor pretraining — design
 
-Date: 2026-10-22. Status: draft for approval.
+Date: 2026-10-22. Status: builder-checked; awaiting user approval.
 Builds on phase 1: `docs/results/2026-10-22-drift-findings.md`, selector analyses in
 `results/summary/phase2_*.csv|json`.
 
@@ -39,7 +39,22 @@ training data shrinks?
   NormAggregation). Reason: the phase-1 fine-tuning runner and the public-CheMeleon
   reference line both assume V2 + mean pooling; a different featurizer/pooling would make
   the reference incomparable and require a second fine-tuning path.
-- D6. E(N) for N ≤ 64 = **6 epochs** (phase-1 n128 `es_epoch`: median 6, IQR 3–10, n=78).
+- D6. Ultra-low-N budget is in **optimizer steps, not epochs**: for N ≤ 64, batch size
+  min(N, 16) and **S = 16 steps** (2 warm-up + one-cycle decay over 14), identical for every
+  arm. Rationale: phase-1's best n128 checkpoints sat at ~12 steps (median es_epoch 6 ×
+  2 batches); with the default batch size of 64, "6 epochs" at N=16 would be 6 steps.
+  N ≥ 128 keeps the paper protocol (80/20 + patience-5), accepting that its validation set
+  is small at 128/256 — that is what the paper and phase 1 did, and it keeps comparability.
+- D7. Arm B = **all 1613** descriptors (CheMeleon's actual target set, the baseline the
+  hypothesis is stated against); T/R/D draw from the 1367 that pass the NaN/constant filter.
+  NaN targets are masked out of the loss in every arm. The how-to-train
+  `RandomDropoutMSE` combines its random mask with the finite-mask by `logical_or`, which
+  (a) keeps every finite target (dropout inert) and (b) can include NaN targets; the
+  builder replaces it with `logical_and` (keep-probability 0.7 AND finite) for all arms.
+- D8. Random controls: **two independent draws of R25** (seeds 0, 1) and one R100, if the
+  compute gate allows (R25 models are cheap); otherwise one draw each and the single-draw
+  caveat is stated. T25/T100/R25/R100 are regenerated from the saved scores (the saved
+  `phase2_descriptor_sets.json` holds the exploratory k=50/100 sets, not the final ones).
 
 ## 2. Goals, non-goals, anti-goals
 
@@ -88,7 +103,9 @@ Shallow FFN (1×256 hidden, fastprop-style; a linear probe is acceptable) on eac
 5-fold CV on the Polaris train split, 3 seeds, for both tasks. Expected from the exploratory
 run: T100 ≥ B on LD50 (0.50 vs 0.45 R²), T100 ≈ B on Ames (0.87 vs 0.88 AUC); T_k > R_k at
 both k on LD50, at k=25 on Ames. Record the table; proceed only if T_k ≥ R_k on at least one
-task at each k.
+task at each k (expected to hold via LD50; Ames at k=25 is untested and may not). If a k
+fails on both tasks, keep the arm but flag it: the FFN check is a feature-level proxy, the
+pretraining experiment is the test.
 
 ## 4. Pretraining (one pipeline, five arms)
 
@@ -144,10 +161,13 @@ task at each k.
 
 ## 7. Pre-registered primary endpoint
 
-**Primary:** paired T100 − B test-score difference (sign-normalized, higher = better),
-averaged over seeds, at N ∈ {16, 32, 64}. **Success** = T100 better than B by more than one
-pooled seed-SD at ≥ 2 of the 3 small-N points, in both tasks, with the gap shrinking
-monotonically (in rank) from N=16 to N=full.
+**Primary:** for each task and N, d_s = score_T100(s) − score_B(s) on paired subsample s,
+sign-normalized so higher = better (LD50 MAE negated); gap(N) = mean_s d_s; SD(N) = SD_s d_s
+(the paired-difference SD, in the metric's units, per N). **Success** = gap(N) > SD(N) at
+≥ 2 of the 3 points N ∈ {16, 32, 64} **in each task**, and gap decreases with N: Spearman
+ρ(gap, log N) < 0 over the 8 sizes and mean gap at N ≤ 64 > mean gap at N ≥ 512. Evaluated
+on the `es` checkpoint (fixed-budget final weights at N ≤ 64); `last` reported as
+secondary.
 **Secondary contrasts:** T_k − R_k at both k (is it the *right* targets or just fewer?);
 T25 − B (does the lean set hold up?); T100 − T25.
 **Interpretation grid:** T > R and T > B → tailoring works; T ≈ R > B → fewer targets
