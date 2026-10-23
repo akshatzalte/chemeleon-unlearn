@@ -178,6 +178,14 @@ discards needed information.
 
 ## 8. Compute (gate first)
 
+**Gate result (2026-10-23 00:50):** on the 180k-row pool, B = 54.5 s/epoch (GPU 0), T25 =
+63.4 s/epoch (GPU 1, shared with another user); cost is independent of k; 6.7 GB allocated /
+15.7 GB reserved → one arm per GPU. 100 epochs × 7 arms ≈ 10.6–12.3 GPU-h; a realistic
+30-epoch stop ≈ 3.2–3.7 GPU-h. Decision: keep P = 200k for the primary arms (launch order
+B+T100 → T25+R100 → R25a+R25b → D535, GPU index recorded per run); spend the headroom
+afterwards on second pretraining seeds for B, T100, T25 (GPU assignment swapped) and, as an
+optional queued replication, B and T100 on the full ~941k pool.
+
 - **Step 1 of execution:** time one B-arm pretraining run on the P=200k pool (one GPU,
   cuik-molmaker, no cache). Decide P and the number of seeds from that number. Cut order if
   it is bad: second pretraining seeds → D535 → P=100k. Never cut B or T100.
