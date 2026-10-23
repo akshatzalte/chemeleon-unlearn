@@ -203,10 +203,17 @@ regardless of which targets were used.
 methodologies"; their positive signals were *relevant molecules* (a 40k analog set beat a
 10M diverse pool) and *property-like targets* (surrogate ADMET predictions, ~6%).
 
+### Mechanism-level checks
+
+- **Frozen encoder** (only the head trains — nothing *can* be unlearned, so a tailored encoder
+  should matter most): T100 − B within ±0.01 at every N; T100 − R100 ≈ +0.01 only at N = 16.
+  Freezing vs fine-tuning the same encoder makes no difference at N ≤ 128 and helps only from
+  N ≥ 256.
+- **64-step small-N budget:** training longer on 16–64 molecules moves the tailored arm slightly
+  *below* B (−0.03 AUC on Ames), not above.
+
 ### Still running (results appended when scored)
 
-- Frozen-encoder ladder (B, T100, R100, chemeleon) — with the encoder frozen nothing can be
-  unlearned, the most direct test of the mechanism; 64-step small-N budget.
 - **Full-pool rescue:** T100 and B pretrained on the full ~941k-molecule pool (T100_full,
   B_full), targeting the one regime where pool size showed an effect.
 

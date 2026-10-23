@@ -111,11 +111,24 @@ Public CheMeleon on Ames at N = 16–32 is the one cell where a pretraining-side
 original pretraining (molecules, length) helps at ultra-low N that our 200k recipe does not
 reproduce. Worth carrying into the lite project; it is not a descriptor-targets effect.
 
-*Pending — appended when scored:* frozen-encoder ladder for B/T100/R100/chemeleon (with the
-encoder frozen nothing can be "unlearned", so a tailored encoder should matter most — the most
-direct test of the mechanism); 64-step budget at N ≤ 64 (does a longer small-N budget separate
-arms?). Per-task tailored sets (Ames-only / LD50-only selection) were cancelled: OpenADMET's
-sweep already establishes robustness to target choice.
+**Frozen-encoder ladder (B, T100, R100, chemeleon; only the head trains).** This is the most
+direct test of the mechanism: with the encoder frozen nothing can be unlearned, so a tailored
+encoder should matter *most*. It does not. T100 − B (frozen) is within ±0.01 at every N in both
+tasks; T100 − R100 (frozen) is +0.013 ± 0.004 (Ames) and +0.010 ± 0.003 (LD50) at N = 16 and
+≈ 0 everywhere else — a 1% effect confined to the uninformative cell. Fine-tuning vs freezing
+the same encoder makes no difference at N ≤ 128 (paired ft − frozen within ±0.02, mixed sign)
+and helps only from N ≥ 256 (LD50: +0.05 MAE at N = 1024–full) — the phase-1 picture again:
+at low N the encoder is effectively frozen whatever we do.
+
+**64-step small-N budget (B, T100, R100; N ≤ 64).** A longer budget does not help the tailored
+arm: T100 − B = −0.034 ± 0.013 and −0.032 ± 0.017 on Ames at N = 16/32, −0.01 on LD50;
+T100 − R100 ≈ −0.01 to −0.02. Training longer on tiny sets separates the arms slightly in
+favour of B, not T100.
+
+Per-task tailored sets (Ames-only / LD50-only selection) were cancelled: OpenADMET's sweep
+already establishes robustness to target choice. *Pending:* T100 and B pretrained on the full
+~941k-molecule pool (`T100_full`, `B_full`) — the one regime (ultra-low N on Ames) where a
+pretraining-side effect was seen.
 
 ## Caveats
 
