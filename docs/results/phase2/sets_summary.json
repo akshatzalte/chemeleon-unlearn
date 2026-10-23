@@ -1,0 +1,49 @@
+{
+ "sizes": {
+  "B": 1613,
+  "D535": 535,
+  "T25": 25,
+  "T100": 100,
+  "R25a": 25,
+  "R25b": 25,
+  "R100": 100
+ },
+ "n_clusters": 535,
+ "overlap": {
+  "T25&R25a": 1,
+  "T25&R25b": 1,
+  "T100&R100": 22,
+  "R25a&R25b": 2,
+  "T25&T100": 25
+ },
+ "T25_subset_of_T100": true,
+ "sanity_model": "ffn",
+ "gate": {
+  "T25": {
+   "R25a": {
+    "per_task": {
+     "ames": false,
+     "ld50-zhu": true
+    },
+    "passed": true
+   },
+   "R25b": {
+    "per_task": {
+     "ames": false,
+     "ld50-zhu": true
+    },
+    "passed": true
+   }
+  },
+  "T100": {
+   "R100": {
+    "per_task": {
+     "ames": false,
+     "ld50-zhu": true
+    },
+    "passed": true
+   }
+  }
+ },
+ "gate_passed": true
+}

@@ -1,0 +1,20 @@
+# After creating: run scripts/p2_env_fixup.sh (preloads the env libstdc++ so torch + conda-forge extensions coexist).
+name: chemeleon_pretrain
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - pip
+  - rdkit
+  - numpy
+  - pandas
+  - pyarrow
+  # cuik-molmaker 0.2 has no Linux wheel on PyPI/pypi.nvidia.com (placeholder sdist, Windows-only wheel); use conda-forge
+  - cuik_molmaker=0.2
+  - zarr>=3
+  - pip:
+      - --extra-index-url https://download.pytorch.org/whl/cu126
+      - torch
+      - lightning
+      - chemprop==2.3.1
+      - mordredcommunity
